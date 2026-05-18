@@ -61,6 +61,39 @@ async function _migrateLegacySettings() {
 function _registerSettings() {
     const s = (key, def) => game.settings.register(MODULE_ID, key, def);
 
+    // ── Settings menu: opens the folder configuration dialog ──
+    // Lets the GM add/remove/edit scan folders and rescan the index
+    // without leaving Foundry's settings panel. Lazy-imports the dialog
+    // module so we don't pull it in unless the user clicks the button.
+    try {
+        game.settings.registerMenu(MODULE_ID, "configureFolders", {
+            name: "Token Art Folders",
+            label: "Configure Folders",
+            hint: "Add, remove, or edit the folders the engine scans for token art — and rescan the index without leaving the dialog.",
+            icon: "fa-solid fa-folder-tree",
+            restricted: true,
+            type: class extends FormApplication {
+                static get defaultOptions() {
+                    return foundry.utils.mergeObject(super.defaultOptions, {
+                        id: "ace-token-art-folder-config-launcher",
+                        title: "ACE: Token Art — Folder Configuration",
+                        template: null,
+                        popOut: false,
+                    });
+                }
+                async _render() {
+                    // Don't actually render a form — just open the real dialog.
+                    const mod = await import("./folder-config-dialog.mjs");
+                    await mod.openFolderConfigDialog();
+                    this.close({ submit: false });
+                }
+                async _updateObject() { /* no-op */ }
+            },
+        });
+    } catch (err) {
+        console.warn(`${MODULE_ID} | Folder config menu registration failed:`, err);
+    }
+
     s("tokenArtEnabled", {
         scope: "world",
         name: "Enable Auto Token Art",
@@ -72,7 +105,7 @@ function _registerSettings() {
 
     s("tokenArtFolders", {
         scope: "world",
-        config: false,    // edited via API for now; UI later if needed
+        config: false,    // edited via the "Configure Folders" menu above
         type: Array,
         default: ["NPCs", "assets/srd5e/img/bestiary/tokens/MM"],
     });
