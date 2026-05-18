@@ -664,12 +664,43 @@ function _stripModifierPrefixes(lower) {
 }
 
 /**
+ * Strip noise from actor names that breaks matching:
+ *   • parenthetical suffixes  "Goblin (CR 1/4)" → "Goblin"
+ *                             "Bandit (Crossbow)" → "Bandit"
+ *   • bracketed suffixes      "Goblin [SK]" → "Goblin"
+ *   • trailing numbers        "Goblin 2", "Goblin #3" → "Goblin"
+ *   • trailing single letter  "Orc A" → "Orc"
+ *   • leading article "The"   "The Goblin" → "Goblin"
+ *   • surrounding whitespace
+ *
+ * Stays lowercase for downstream lookup keys. Idempotent — applying
+ * twice yields the same result.
+ */
+function _stripActorNameNoise(lower) {
+    return String(lower ?? "")
+        .replace(/\s*\([^)]*\)\s*/g, " ")    // parenthetical suffixes
+        .replace(/\s*\[[^\]]*\]\s*/g, " ")    // bracketed suffixes
+        .replace(/\s*[#]?\s*\d+\s*$/, "")     // trailing numbers / "#3"
+        .replace(/\s+[a-z]$/i, "")            // trailing single letter ("Orc A")
+        .replace(/^the\s+/i, "")              // leading "the"
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+/**
  * Find candidate art for an actor by name.
  * Returns { matches: Entry[], reason: "exact" | "base" | "stripped" | "key" | "substring" | "none" }
  */
 function _findMatches(actorName) {
-    const lower = (actorName || "").toLowerCase().trim();
-    if (!lower) return { matches: [], reason: "none" };
+    const rawLower = (actorName || "").toLowerCase().trim();
+    if (!rawLower) return { matches: [], reason: "none" };
+
+    // Strip parenthetical CR suffixes, brackets, trailing numbers, "the",
+    // etc. BEFORE running lookups. Otherwise an actor named "Goblin (CR 1/4)"
+    // doesn't match anything by base/prefix and falls through to the
+    // substring fallback — which only returns the literal "Goblin.webp"
+    // files (7), missing the other 400+ goblin variants entirely.
+    const lower = _stripActorNameNoise(rawLower) || rawLower;
 
     // Detect the actor's creature family ("goblin" → goblinoid, "skeleton"
     // → undead, etc.). Used to bias each match step toward art that lives
