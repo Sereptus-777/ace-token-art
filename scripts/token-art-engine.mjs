@@ -909,31 +909,73 @@ async function _shouldWaitForBio(tokenDoc) {
 }
 
 /**
- * Poll `actor.bioGenerated` until it flips true (or 30s passes). After 2s
- * of waiting, post a "waiting for bio…" notification so the GM knows why
- * the chooser hasn't appeared yet.
+ * Wait until ACE Engine's bio + faction pipeline fires its completion
+ * hook for THIS token. No hard timeout — the GM can spend 30 seconds or
+ * 30 minutes picking a faction in the Customize dialog, the chooser
+ * patiently waits. After 2s a toast appears so the GM knows the chooser
+ * is paused on purpose.
+ *
+ * Three completion signals (any one wins):
+ *   1. `ace-engine.bioComplete` Hook fires for this token   ← primary
+ *   2. `flags.ace-engine.bioGenerated` becomes true         ← fallback
+ *   3. 10-minute hard cutoff so a wedged session doesn't    ← safety
+ *      hang the chooser literally forever
  */
 async function _waitForBio(tokenDoc) {
-    const deadline = Date.now() + 30000;
+    const HARD_CUTOFF_MS = 10 * 60 * 1000;  // 10 minutes — sanity net only
+    const POLL_INTERVAL_MS = 500;
+    const TOAST_DELAY_MS = 2000;
     const t0 = Date.now();
+    const deadline = t0 + HARD_CUTOFF_MS;
+
     let waitToast = null;
-    while (Date.now() < deadline) {
-        await new Promise(r => setTimeout(r, 500));
-        if (tokenDoc.actor?.getFlag?.("ace-engine", "bioGenerated")) {
-            break;
-        }
-        // Post a single info toast once the wait crosses 2s
-        if (!waitToast && Date.now() - t0 > 2000) {
+    const tokenId = tokenDoc.id;
+
+    // Promise that resolves when the bioComplete hook fires for our token.
+    let hookResolve;
+    const hookPromise = new Promise(resolve => { hookResolve = resolve; });
+    const hookId = Hooks.on("ace-engine.bioComplete", (data) => {
+        try {
+            if (data?.tokenDoc?.id === tokenId || data?.actor?.id === tokenDoc.actor?.id) {
+                hookResolve("hook");
+            }
+        } catch (_) { /* non-fatal */ }
+    });
+
+    try {
+        // Race the hook against a polling loop (for the case where the
+        // pipeline doesn't fire the hook but still flips the flag — e.g.
+        // older ace-engine versions, or unusual code paths).
+        const pollPromise = (async () => {
+            while (Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+                if (tokenDoc.actor?.getFlag?.("ace-engine", "bioGenerated")) return "flag";
+            }
+            return "timeout";
+        })();
+
+        // Toast after 2s of waiting (whichever signal wins, this fires once)
+        const toastTimer = setTimeout(() => {
             try {
-                waitToast = ui.notifications?.info?.(`ACE: Token Art — waiting for bio/faction setup before showing variants…`, { permanent: true });
+                waitToast = ui.notifications?.info?.(
+                    `ACE: Token Art — waiting for bio/faction setup before showing variants… (will wait until pipeline finishes)`,
+                    { permanent: true }
+                );
             } catch (_) { /* non-fatal */ }
+        }, TOAST_DELAY_MS);
+
+        const winner = await Promise.race([hookPromise, pollPromise]);
+        clearTimeout(toastTimer);
+
+        const elapsed = Date.now() - t0;
+        if (winner === "timeout") {
+            console.warn(`${TAG} | Bio wait hit 10-minute safety cutoff — proceeding with current actor data.`);
+        } else {
+            console.log(`${TAG} | Bio wait complete in ${elapsed}ms via ${winner}.`);
         }
-    }
-    try { waitToast?.remove?.(); } catch (_) { /* non-fatal */ }
-    if (Date.now() >= deadline) {
-        console.warn(`${TAG} | Bio wait timed out (30s) — proceeding with current actor data.`);
-    } else {
-        console.log(`${TAG} | Bio wait complete in ${Date.now() - t0}ms.`);
+    } finally {
+        Hooks.off("ace-engine.bioComplete", hookId);
+        try { waitToast?.remove?.(); } catch (_) { /* non-fatal */ }
     }
 }
 
