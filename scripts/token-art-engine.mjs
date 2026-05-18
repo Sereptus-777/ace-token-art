@@ -708,28 +708,46 @@ function _findMatches(actorName) {
     // normal behavior when no family or no taxonomic-folder hits exist.
     const actorFamily = _detectActorFamily(lower);
 
-    // 1. Exact full-name match — "Goblin Archer" hits "Goblin - Archer.webp"
-    //    OR a single file literally named "Goblin Archer.webp"
-    const exact = _index.byFullName.get(lower);
-    if (exact) return { matches: [exact], reason: "exact" };
+    // 1+2. Combined exact + base + prefix expansion — gather ALL candidates,
+    //      don't short-circuit on an exact hit. If actor "Goblin" matches
+    //      a literal "Goblin.webp" via exact AND there are 400+ files whose
+    //      base STARTS with "Goblin " (Goblin Boss, Goblin Archer, etc.),
+    //      we want to surface ALL of them in the chooser — the exact match
+    //      becomes one of many options ranked at the top. Short-circuiting
+    //      on exact match was the reason "Goblin (CR 1/4)" → after noise
+    //      strip "goblin" → only the one literal Goblin.webp showed up.
+    const candidates = [];
+    const seen = new Set();
+    const pushUnique = (e) => {
+        if (!e || seen.has(e.path)) return;
+        seen.add(e.path);
+        candidates.push(e);
+    };
 
-    // 2. Base-name match + prefix expansion — "Goblin" hits the literal
-    //    "Goblin.webp" AND every file whose name STARTS with "Goblin " (so
-    //    "Goblin Archer", "Goblin Boss", "Goblin Scout" all show up as
-    //    selectable variants instead of being invisible because they're
-    //    indexed under their own bases like "Goblin Boss").
+    // Exact full-name match — push first so it ranks at top
+    const exact = _index.byFullName.get(lower);
+    if (exact) pushUnique(exact);
+
+    // Base-name match
     const baseHits = _index.byBase.get(lower);
+    if (baseHits?.length) {
+        for (const e of baseHits) pushUnique(e);
+    }
+
+    // Prefix expansion — every file whose base or fullName starts with "<name> "
     const prefix = lower + " ";
-    const prefixHits = [];
     for (const e of _index.all) {
-        if (e.baseLower === lower) continue;            // already in baseHits
         if (e.baseLower.startsWith(prefix) || e.fullLower.startsWith(prefix)) {
-            prefixHits.push(e);
+            pushUnique(e);
         }
     }
-    const combined = [...(baseHits ?? []), ...prefixHits];
-    if (combined.length) {
-        return { matches: _preferFamilyFolder(combined, actorFamily), reason: prefixHits.length ? "base+prefix" : "base" };
+
+    if (candidates.length) {
+        const reasonParts = [];
+        if (exact) reasonParts.push("exact");
+        if (baseHits?.length) reasonParts.push("base");
+        if (candidates.length > (exact ? 1 : 0) + (baseHits?.length ?? 0)) reasonParts.push("prefix");
+        return { matches: _preferFamilyFolder(candidates, actorFamily), reason: reasonParts.join("+") || "base" };
     }
 
     // 3. Strip modifier prefixes (Conjured/Summoned/Adult/...) and retry
