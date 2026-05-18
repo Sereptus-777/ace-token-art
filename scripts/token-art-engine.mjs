@@ -175,15 +175,20 @@ function _detectActorFamily(actorName) {
 
 /**
  * Normalize a filename or folder name into a sane lookup string.
- *   • URL-decode  → "%20" becomes " "  (Foundry's FilePicker returns URL-escaped paths)
- *   • underscores → spaces
- *   • CamelCase   → "Camel Case"  (so "AirMyrmidon" becomes findable)
+ *   • URL-decode    → "%20" becomes " "  (Foundry's FilePicker returns URL-escaped paths)
+ *   • underscores   → spaces             ("goblin_archer" → "goblin archer")
+ *   • inline hyphens → spaces            ("goblin-warrior" → "goblin warrior")
+ *                     — but " - " is preserved as the variant separator
+ *   • CamelCase     → "Camel Case"       ("AirMyrmidon" → "Air Myrmidon")
  *   • multiple spaces collapse
  *
- * Without URL decoding, "Goblin%20Boss.webp" stays "Goblin%20Boss" and the
- * matcher misses it entirely when comparing against actor "Goblin Boss".
- * Without CamelCase splitting, "AirMyrmidon.webp" stays a single token
- * "airmyrmidon" and never matches the actor "Air Myrmidon".
+ * Hyphen handling: `goblin-warrior.webp` previously stayed as one token
+ * "goblin-warrior", invisible to actor "Goblin Warrior" or "Goblin" lookups.
+ * Now an inline hyphen (NOT padded by spaces) becomes a space. The " - "
+ * convention (space-hyphen-space) is preserved as the variant separator so
+ * files like `Goblin - Archer.webp` still split into base="Goblin"
+ * variant="Archer". Compound species names like "Half-Orc" are normalized
+ * to "Half Orc" — matches actors named either way after normalization.
  */
 function _normalizeFilename(s) {
     let str = String(s || "");
@@ -192,6 +197,9 @@ function _normalizeFilename(s) {
     return str
         // Underscores → spaces
         .replace(/[_]+/g, " ")
+        // Inline hyphen → space, but leave " - " alone (variant separator).
+        // The negative lookbehind/lookahead asserts no surrounding space.
+        .replace(/(?<!\s)-(?!\s)/g, " ")
         // CamelCase splits: aB → a B, ABc → A Bc (handles acronyms like "AIWizard" → "AI Wizard")
         .replace(/([a-z\d])([A-Z])/g, "$1 $2")
         .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
