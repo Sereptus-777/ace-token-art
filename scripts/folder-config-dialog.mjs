@@ -165,19 +165,20 @@ export async function openFolderConfigDialog() {
 
     const doRescan = async (rootEl) => {
         const status = rootEl.querySelector("#atac-status");
-        if (status) status.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Scanning…`;
+        if (status) status.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Scanning… (this rebuilds the cache for next reload)`;
         try {
             // Save current edits first, THEN rescan — rescan reads the
-            // setting fresh each time.
+            // setting fresh each time. Pass useCache:false so this button
+            // ALWAYS does a fresh disk scan (the whole point of the button).
             const folders = collectFolders(rootEl);
             await game.settings.set(MODULE_ID, "tokenArtFolders", folders);
-            const result = await game.modules.get(MODULE_ID).api.rescanTokenArt();
+            const result = await game.modules.get(MODULE_ID).api.rescanTokenArt({ useCache: false });
             if (status) {
                 const fileCount = result?.fileCount ?? 0;
                 const baseCount = result?.baseCount ?? 0;
-                status.innerHTML = `<span style="color:#a0e0a0;"><i class="fas fa-check"></i> Scan complete: <strong>${fileCount.toLocaleString()}</strong> files / <strong>${baseCount.toLocaleString()}</strong> creature bases indexed.</span>`;
+                status.innerHTML = `<span style="color:#a0e0a0;"><i class="fas fa-check"></i> Scan complete: <strong>${fileCount.toLocaleString()}</strong> files / <strong>${baseCount.toLocaleString()}</strong> creature bases indexed. Cache saved.</span>`;
             }
-            ui.notifications?.info?.(`ACE: Token Art — indexed ${result?.fileCount ?? 0} files.`);
+            ui.notifications?.info?.(`ACE: Token Art — indexed ${result?.fileCount ?? 0} files. Cache saved for next reload.`);
         } catch (err) {
             console.error(`${TAG} | Rescan failed:`, err);
             if (status) status.innerHTML = `<span style="color:#e08080;"><i class="fas fa-exclamation-triangle"></i> Rescan failed: ${escape(err.message ?? String(err))}</span>`;

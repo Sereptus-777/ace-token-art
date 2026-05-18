@@ -170,10 +170,22 @@ Hooks.once("ready", async () => {
     const mod = game.modules.get(MODULE_ID);
     if (mod) {
         mod.api = {
-            /** Rescan configured folders + rebuild the in-memory index. */
-            rescanTokenArt: async () => {
-                const result = await rebuildTokenArtIndex();
-                ui.notifications?.info(`${MODULE_ID}: Rescanned — ${result.fileCount} files, ${result.baseCount} base names.`);
+            /**
+             * Rescan configured folders + rebuild the in-memory index.
+             * @param {object} [opts]
+             * @param {boolean} [opts.useCache=false] — pass true to load
+             *   from the cache when folders match instead of rescanning
+             *   from disk. Default false because callers of this API
+             *   (Rescan button, console) usually want a fresh scan.
+             * @param {boolean} [opts.silent=false] — suppress toast UI.
+             */
+            rescanTokenArt: async (opts = {}) => {
+                const useCache = opts.useCache ?? false;
+                const silent = opts.silent ?? false;
+                const result = await rebuildTokenArtIndex({ useCache, silent });
+                if (!silent && !result.fromCache) {
+                    ui.notifications?.info(`${MODULE_ID}: Rescanned — ${result.fileCount} files, ${result.baseCount} base names.`);
+                }
                 return result;
             },
             /** Inspect the current in-memory index (for debugging). */

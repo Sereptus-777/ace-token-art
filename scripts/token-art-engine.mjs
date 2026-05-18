@@ -257,6 +257,114 @@ function _preferFamilyFolder(matches, actorFamily) {
 
 // ─── Folder scanning ───────────────────────────────────────────────────────
 
+// ─── Persistent index cache ────────────────────────────────────────────────
+// Saves the parsed index to a JSON file under the world folder so reload
+// doesn't have to re-scan thousands of files every time. Cache is loaded
+// on world ready (unless folder list changed since last save). The Rescan
+// Folders button forces a full re-scan and refreshes the cache.
+
+const CACHE_VERSION = 2;  // bump when the entry schema changes
+const CACHE_DIR  = (worldId) => `worlds/${worldId}/ace-token-art`;
+const CACHE_FILE = "index-cache.json";
+
+/** Save the current in-memory index to a JSON cache file. */
+async function _saveIndexCache(folders) {
+    if (!_index.ready || !game.world?.id) return;
+    const FP = foundry.applications?.apps?.FilePicker?.implementation ?? globalThis.FilePicker;
+    const dir = CACHE_DIR(game.world.id);
+    const payload = {
+        version: CACHE_VERSION,
+        savedAt: new Date().toISOString(),
+        folders: folders.slice(),
+        // Cache only the FIELDS that come from parsing the path; the
+        // derived fields (baseLower, fullLower, keyTokens, familyFolder)
+        // are recomputed by _makeEntry on load so changes to the
+        // normalization rules pick up automatically.
+        entries: _index.all.map(e => ({
+            path: e.path,
+            displayBase: e.displayBase,
+            displayVariant: e.displayVariant ?? null,
+            fullName: e.fullName,
+        })),
+    };
+    const json = JSON.stringify(payload);
+    const blob = new Blob([json], { type: "application/json" });
+    const file = new File([blob], CACHE_FILE, { type: "application/json" });
+    // Ensure the cache directory exists before uploading
+    try { await FP.browse("data", dir); }
+    catch (_) {
+        try { await FP.createDirectory("data", `worlds/${game.world.id}`); } catch (_) {}
+        try { await FP.createDirectory("data", dir); } catch (_) {}
+    }
+    try {
+        // suppress "uploaded" toast — this is internal bookkeeping
+        const _origInfo = ui.notifications?.info;
+        if (ui.notifications) ui.notifications.info = () => {};
+        try {
+            await FP.upload("data", dir, file, { notify: false });
+        } finally {
+            if (ui.notifications && _origInfo) ui.notifications.info = _origInfo;
+        }
+        console.log(`${TAG} | Cache saved: ${payload.entries.length} entries, ${(json.length / 1024).toFixed(1)} KB`);
+    } catch (err) {
+        console.warn(`${TAG} | Cache save failed:`, err?.message ?? err);
+    }
+}
+
+/** Try to load the JSON cache. Returns null on miss or schema mismatch. */
+async function _loadIndexCache() {
+    if (!game.world?.id) return null;
+    const FP = foundry.applications?.apps?.FilePicker?.implementation ?? globalThis.FilePicker;
+    const dir = CACHE_DIR(game.world.id);
+    const path = `${dir}/${CACHE_FILE}`;
+    try {
+        // Existence check via FilePicker.browse (avoids a 404 in the console
+        // every load when the cache hasn't been built yet).
+        let exists = false;
+        try {
+            const listing = await FP.browse("data", dir);
+            exists = (listing?.files ?? []).some(f => f.endsWith(CACHE_FILE));
+        } catch (_) { return null; }
+        if (!exists) return null;
+        const r = await fetch(`/${path}?_=${Date.now()}`);
+        if (!r.ok) return null;
+        const data = await r.json();
+        if (data?.version !== CACHE_VERSION) {
+            console.log(`${TAG} | Cache schema version mismatch (got ${data?.version}, expected ${CACHE_VERSION}) — will rebuild.`);
+            return null;
+        }
+        return data;
+    } catch (err) {
+        console.warn(`${TAG} | Cache load failed (will rebuild):`, err?.message ?? err);
+        return null;
+    }
+}
+
+/** Rebuild in-memory index Maps from a cached entries array. */
+function _hydrateIndexFromCache(entries) {
+    _index.byBase    = new Map();
+    _index.byFullName = new Map();
+    _index.byKey     = new Map();
+    _index.all       = [];
+    for (const e of entries) {
+        const entry = _makeEntry({
+            path: e.path,
+            displayBase: e.displayBase,
+            displayVariant: e.displayVariant,
+            fullName: e.fullName,
+        });
+        _index.all.push(entry);
+        if (!_index.byFullName.has(entry.fullLower)) _index.byFullName.set(entry.fullLower, entry);
+        const baseArr = _index.byBase.get(entry.baseLower);
+        if (baseArr) baseArr.push(entry); else _index.byBase.set(entry.baseLower, [entry]);
+        if (entry.keyTokens) {
+            const keyArr = _index.byKey.get(entry.keyTokens);
+            if (keyArr) keyArr.push(entry); else _index.byKey.set(entry.keyTokens, [entry]);
+        }
+    }
+    _index.ready = true;
+}
+
 /** Walk a folder recursively, return all image file paths (relative to data root). */
 async function _scanFolder(rootPath) {
     const FP = foundry.applications?.apps?.FilePicker?.implementation ?? globalThis.FilePicker;
@@ -288,15 +396,45 @@ async function _scanFolder(rootPath) {
 
 /**
  * (Re)build the in-memory token-art index from the user's configured folders.
- * Call after the GM changes the folder setting or clicks "Rescan Folders".
+ *
+ * Call sites:
+ *   • activateTokenArtEngine() on world ready — passes useCache: true so a
+ *     prior run's cache loads instantly (no FilePicker round-trips).
+ *   • Folder Configuration dialog "Rescan Now" — passes useCache: false to
+ *     force a fresh disk scan.
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.useCache=true] — load from `worlds/<id>/ace-token-art/index-cache.json` when configured folders match
+ * @param {boolean} [opts.silent=false]  — suppress the "scanning…" toast (used by background reloads)
  */
-export async function rebuildTokenArtIndex() {
+export async function rebuildTokenArtIndex({ useCache = true, silent = false } = {}) {
     const folders = (() => {
         try {
             const raw = game.settings.get(MODULE_ID, "tokenArtFolders");
             return Array.isArray(raw) ? raw : [];
         } catch (_) { return []; }
     })();
+
+    // ── Try the persistent cache first ──
+    if (useCache) {
+        const cache = await _loadIndexCache();
+        if (cache?.entries?.length) {
+            // Only trust the cache if the folder list matches exactly.
+            // If the GM added/removed folders we MUST rescan to pick up
+            // the new/missing files.
+            const cachedFolders = Array.isArray(cache.folders) ? cache.folders : [];
+            if (JSON.stringify(cachedFolders) === JSON.stringify(folders)) {
+                _hydrateIndexFromCache(cache.entries);
+                console.log(`${TAG} | Loaded ${cache.entries.length} entries from cache (saved ${cache.savedAt}). Skip rescan — Rescan Folders to refresh.`);
+                if (!silent) {
+                    try { ui.notifications?.info?.(`ACE: Token Art — loaded ${cache.entries.length.toLocaleString()} entries from cache (instant). Rescan Folders to pick up new art.`); }
+                    catch (_) { /* non-fatal */ }
+                }
+                return { fileCount: cache.entries.length, baseCount: _index.byBase.size, fromCache: true };
+            }
+            console.log(`${TAG} | Cache folder list differs from current setting — full rescan needed.`);
+        }
+    }
 
     if (!folders.length) {
         console.log(`${TAG} | No folders configured — index empty.`);
@@ -310,9 +448,11 @@ export async function rebuildTokenArtIndex() {
     console.log(`${TAG} | Scanning ${folders.length} folder(s)…`);
     // Persistent notification while we scan — auto-dismissed below.
     let scanNotification = null;
-    try {
-        scanNotification = ui.notifications?.info?.(`ACE: Token Art — scanning ${folders.length} folder${folders.length === 1 ? "" : "s"}…`, { permanent: true });
-    } catch (_) { /* non-fatal */ }
+    if (!silent) {
+        try {
+            scanNotification = ui.notifications?.info?.(`ACE: Token Art — scanning ${folders.length} folder${folders.length === 1 ? "" : "s"}… (cached for next reload)`, { permanent: true });
+        } catch (_) { /* non-fatal */ }
+    }
     const t0 = performance.now();
 
     const allPaths = [];
@@ -470,9 +610,15 @@ export async function rebuildTokenArtIndex() {
             ui.notifications.queue = ui.notifications.queue.filter(n => n.id !== scanNotification);
         }
     } catch (_) { /* non-fatal */ }
-    try {
-        ui.notifications?.info?.(`ACE: Token Art — ${all.length.toLocaleString()} files / ${byBase.size.toLocaleString()} creatures indexed (${ms}ms)`);
-    } catch (_) { /* non-fatal */ }
+    if (!silent) {
+        try {
+            ui.notifications?.info?.(`ACE: Token Art — ${all.length.toLocaleString()} files / ${byBase.size.toLocaleString()} creatures indexed (${ms}ms) — cached for next reload`);
+        } catch (_) { /* non-fatal */ }
+    }
+
+    // Persist the fresh index so the next world load is instant. Fire-and-
+    // forget; failures only mean we'll rescan again next time.
+    _saveIndexCache(folders).catch(err => console.warn(`${TAG} | Cache save (non-fatal):`, err));
 
     return { fileCount: all.length, baseCount: byBase.size };
 }
