@@ -877,6 +877,66 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
     });
 }
 
+// ─── Bio-pipeline detection + wait helpers ─────────────────────────────────
+//
+// The chooser fires immediately when bio is OFF, and waits up to 30s when
+// bio is ON. After the wait, we read the assigned faction role to refine
+// the search ("Goblin" + "Archer" → "Goblin Archer").
+
+const NO_RENAME_TYPES = new Set(["beast", "ooze", "plant", "swarm"]);
+
+/** Will the ACE Engine bio pipeline process this token on drop? */
+async function _shouldWaitForBio(tokenDoc) {
+    try {
+        // ACE Engine module not installed → no bio pipeline
+        if (!game.modules.get("ace-engine")?.active) return false;
+        // Bio generation explicitly off
+        const bioEnabled = game.settings.get("ace-engine", "autoGenerateBio") !== false;
+        if (!bioEnabled) return false;
+        // tokenDropAI tier off → pipeline short-circuits
+        const tier = String(game.settings.get("ace-engine", "tokenDropAI") ?? "full");
+        if (tier === "off") return false;
+        // Non-sentient creatures: bio runs but produces no rename / role
+        const creatureType = String(tokenDoc.actor?.system?.details?.type?.value ?? "").toLowerCase();
+        if (NO_RENAME_TYPES.has(creatureType)) return false;
+        // If actor already has bioGenerated flag set, pipeline has already
+        // run (or skipped) — no need to wait.
+        if (tokenDoc.actor?.getFlag?.("ace-engine", "bioGenerated")) return false;
+        return true;
+    } catch (_) {
+        return false;  // any error → don't block, fire immediately
+    }
+}
+
+/**
+ * Poll `actor.bioGenerated` until it flips true (or 30s passes). After 2s
+ * of waiting, post a "waiting for bio…" notification so the GM knows why
+ * the chooser hasn't appeared yet.
+ */
+async function _waitForBio(tokenDoc) {
+    const deadline = Date.now() + 30000;
+    const t0 = Date.now();
+    let waitToast = null;
+    while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 500));
+        if (tokenDoc.actor?.getFlag?.("ace-engine", "bioGenerated")) {
+            break;
+        }
+        // Post a single info toast once the wait crosses 2s
+        if (!waitToast && Date.now() - t0 > 2000) {
+            try {
+                waitToast = ui.notifications?.info?.(`ACE: Token Art — waiting for bio/faction setup before showing variants…`, { permanent: true });
+            } catch (_) { /* non-fatal */ }
+        }
+    }
+    try { waitToast?.remove?.(); } catch (_) { /* non-fatal */ }
+    if (Date.now() >= deadline) {
+        console.warn(`${TAG} | Bio wait timed out (30s) — proceeding with current actor data.`);
+    } else {
+        console.log(`${TAG} | Bio wait complete in ${Date.now() - t0}ms.`);
+    }
+}
+
 // ─── createToken hook handler ──────────────────────────────────────────────
 
 async function _onTokenCreated(tokenDoc, options, userId) {
@@ -906,28 +966,38 @@ async function _onTokenCreated(tokenDoc, options, userId) {
         try { await rebuildTokenArtIndex(); } catch (err) { console.warn(`${TAG} | Initial index build failed:`, err); }
     }
 
-    // ── Settle delay: give ACE Engine's bio + faction pipeline a moment to
-    //    rename the token before we lock in matches. Without this, dropping
-    //    a "Goblin" pops the chooser instantly with only "Goblin" variants
-    //    visible — and a moment later the bio renames the token to "Goblin
-    //    Archer" or assigns a faction role, but the chooser is already
-    //    showing the wrong candidate set.
+    // ── Smart wait for ACE Engine's bio + faction pipeline ──
+    // Two-part logic:
+    //   1. _shouldWaitForBio: only wait if bio is actually going to run
+    //      for this token (setting on, tier !== off, creature is sentient).
+    //      Skips the wait entirely otherwise — instant chooser, no
+    //      lag for users who don't have the bio system enabled.
+    //   2. _waitForBio: polls actor.bioGenerated flag every 500ms with
+    //      30s deadline. Posts a "waiting…" notification if the wait
+    //      exceeds 2s so the GM knows what's happening.
     //
-    //    Foundry doesn't expose a "bio pipeline complete" hook from
-    //    ace-engine, but we can poll for a name change in a short window.
-    //    If the name DOES change, we re-fire the match with the new name.
-    //    If not, we proceed with the original name as before.
-    const initialName = tokenDoc.name;
-    const settleDeadline = Date.now() + 4000; // up to 4s
-    while (Date.now() < settleDeadline) {
-        await new Promise(r => setTimeout(r, 250));
-        if (tokenDoc.name !== initialName) {
-            console.log(`${TAG} | Token renamed during settle ("${initialName}" → "${tokenDoc.name}") — matching with new name.`);
-            break;
-        }
+    // After the wait, build the search string from the ORIGINAL creature
+    // name (captured before the wait) plus the faction-assigned role flag
+    // (e.g. "Goblin" + "Archer" = "Goblin Archer"). This way bio renaming
+    // the token to "Gronk" doesn't break art matching — we still search
+    // for art keyed on the species, with role-narrowing for the variant.
+    const initialActorName = String(tokenDoc.actor?.name ?? tokenDoc.name ?? "");
+    if (await _shouldWaitForBio(tokenDoc)) {
+        await _waitForBio(tokenDoc);
     }
 
-    const { matches, reason } = _findMatches(tokenDoc.name);
+    // Build a role-aware search name: species + role.
+    // factionRole comes from the smart-setup or customize dialog.
+    let searchName = initialActorName;
+    try {
+        const role = String(tokenDoc.actor?.getFlag?.("ace-engine", "factionRole") ?? "").trim();
+        if (role && !initialActorName.toLowerCase().includes(role.toLowerCase())) {
+            searchName = `${initialActorName} ${role}`.trim();
+            console.log(`${TAG} | Role-aware lookup: "${initialActorName}" + "${role}" → "${searchName}"`);
+        }
+    } catch (_) { /* role flag absent — proceed with name only */ }
+
+    const { matches, reason } = _findMatches(searchName);
 
     console.log(`${TAG} | "${actor.name}" — current="${currentImg}", matches=${matches.length}, reason="${reason}"`);
     if (matches.length) {
