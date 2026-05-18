@@ -175,15 +175,21 @@ function _detectActorFamily(actorName) {
 
 /**
  * Normalize a filename or folder name into a sane lookup string.
- *   • underscores  → spaces
- *   • CamelCase    → "Camel Case"  (so "AirMyrmidon" becomes findable)
+ *   • URL-decode  → "%20" becomes " "  (Foundry's FilePicker returns URL-escaped paths)
+ *   • underscores → spaces
+ *   • CamelCase   → "Camel Case"  (so "AirMyrmidon" becomes findable)
  *   • multiple spaces collapse
  *
+ * Without URL decoding, "Goblin%20Boss.webp" stays "Goblin%20Boss" and the
+ * matcher misses it entirely when comparing against actor "Goblin Boss".
  * Without CamelCase splitting, "AirMyrmidon.webp" stays a single token
  * "airmyrmidon" and never matches the actor "Air Myrmidon".
  */
 function _normalizeFilename(s) {
-    return (s || "")
+    let str = String(s || "");
+    // URL-decode (Foundry FilePicker returns paths with %20 etc.)
+    try { str = decodeURIComponent(str); } catch (_) { /* malformed escape — leave as-is */ }
+    return str
         // Underscores → spaces
         .replace(/[_]+/g, " ")
         // CamelCase splits: aB → a B, ABc → A Bc (handles acronyms like "AIWizard" → "AI Wizard")
@@ -294,6 +300,11 @@ export async function rebuildTokenArtIndex() {
     }
 
     console.log(`${TAG} | Scanning ${folders.length} folder(s)…`);
+    // Persistent notification while we scan — auto-dismissed below.
+    let scanNotification = null;
+    try {
+        scanNotification = ui.notifications?.info?.(`ACE: Token Art — scanning ${folders.length} folder${folders.length === 1 ? "" : "s"}…`, { permanent: true });
+    } catch (_) { /* non-fatal */ }
     const t0 = performance.now();
 
     const allPaths = [];
@@ -443,6 +454,18 @@ export async function rebuildTokenArtIndex() {
     const ms = (performance.now() - t0).toFixed(0);
     console.log(`${TAG} | Index built in ${ms}ms — ${all.length} files, ${byBase.size} unique base names, ${byKey.size} key signatures, ${creatureFolderCount} creature folders, ${binFolderCount} category folders.`);
 
+    // Dismiss the in-progress toast (if any) and replace with a completion one.
+    try {
+        if (scanNotification?.remove) scanNotification.remove();
+        else if (typeof scanNotification === "number" && ui.notifications?.queue) {
+            // legacy notification id shape — best effort
+            ui.notifications.queue = ui.notifications.queue.filter(n => n.id !== scanNotification);
+        }
+    } catch (_) { /* non-fatal */ }
+    try {
+        ui.notifications?.info?.(`ACE: Token Art — ${all.length.toLocaleString()} files / ${byBase.size.toLocaleString()} creatures indexed (${ms}ms)`);
+    } catch (_) { /* non-fatal */ }
+
     return { fileCount: all.length, baseCount: byBase.size };
 }
 
@@ -505,9 +528,24 @@ function _findMatches(actorName) {
     const exact = _index.byFullName.get(lower);
     if (exact) return { matches: [exact], reason: "exact" };
 
-    // 2. Base-name match — "Goblin" hits all Goblin variants
+    // 2. Base-name match + prefix expansion — "Goblin" hits the literal
+    //    "Goblin.webp" AND every file whose name STARTS with "Goblin " (so
+    //    "Goblin Archer", "Goblin Boss", "Goblin Scout" all show up as
+    //    selectable variants instead of being invisible because they're
+    //    indexed under their own bases like "Goblin Boss").
     const baseHits = _index.byBase.get(lower);
-    if (baseHits?.length) return { matches: _preferFamilyFolder(baseHits.slice(), actorFamily), reason: "base" };
+    const prefix = lower + " ";
+    const prefixHits = [];
+    for (const e of _index.all) {
+        if (e.baseLower === lower) continue;            // already in baseHits
+        if (e.baseLower.startsWith(prefix) || e.fullLower.startsWith(prefix)) {
+            prefixHits.push(e);
+        }
+    }
+    const combined = [...(baseHits ?? []), ...prefixHits];
+    if (combined.length) {
+        return { matches: _preferFamilyFolder(combined, actorFamily), reason: prefixHits.length ? "base+prefix" : "base" };
+    }
 
     // 3. Strip modifier prefixes (Conjured/Summoned/Adult/...) and retry
     //    exact + base lookups. Most useful for spell-summoned creatures
@@ -617,12 +655,39 @@ function _dismissActiveChooser() {
     _activeChooser = null;
 }
 
+// Maximum thumbnails to surface in the chooser at once. Above this, the
+// chooser pages OR truncates — current behavior is truncate-with-note so
+// the GM isn't faced with hundreds of identical-looking goblins.
+const CHOOSER_MAX_DISPLAYED = 12;
+
 /**
  * Pop a lightweight thumbnail chooser near the placed token. Resolves with
  * the chosen Entry, or null if dismissed without a choice (in which case the
  * pre-highlighted variant is used as the default).
  */
 function _showChooser(tokenDoc, matches, { actorName } = {}) {
+    // Cap displayed matches — for "Goblin" with 425 indexed files, dumping
+    // them all on screen is unusable. Prefer family-folder + recent-choice
+    // priority, then take the first N.
+    const recent = _getRecentChoices();
+    const lastPath = recent[(actorName || "").toLowerCase().trim()] ?? null;
+    const truncated = matches.length > CHOOSER_MAX_DISPLAYED;
+    let prioritized = matches;
+    if (truncated) {
+        // Put the most-recent-chosen first (if it's in the set), then
+        // family-folder entries, then everything else. Cap to N.
+        const recentEntry = matches.find(m => m.path === lastPath);
+        const family = matches.filter(m => m.familyFolder && m !== recentEntry);
+        const rest   = matches.filter(m => !m.familyFolder && m !== recentEntry);
+        prioritized = [
+            ...(recentEntry ? [recentEntry] : []),
+            ...family,
+            ...rest,
+        ].slice(0, CHOOSER_MAX_DISPLAYED);
+    }
+    const totalCount = matches.length;
+    matches = prioritized;
+
     return new Promise((resolve) => {
         _dismissActiveChooser();
 
@@ -647,8 +712,6 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
         // isFirstTimePick = no remembered choice for this creature in this
         // world → user has never seen these variants before → no auto-pick
         // timer at all (wait for explicit input).
-        const recent = _getRecentChoices();
-        const lastPath = recent[(actorName || "").toLowerCase().trim()] ?? null;
         const isFirstTimePick = !lastPath;
         let highlightIdx = matches.findIndex(m => m.path === lastPath);
         if (highlightIdx < 0) highlightIdx = 0;
@@ -662,7 +725,10 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
 
         const header = document.createElement("div");
         header.className = "ace-tap-header";
-        header.innerHTML = `<i class="fas fa-image"></i> <strong>${actorName ?? "Token"}</strong> — pick variant <span class="ace-tap-hint">(click • Enter • 1-9 • R random • Esc)</span>`;
+        const truncNote = truncated
+            ? ` <span class="ace-tap-hint" style="color:#d4af37;">(showing top ${matches.length} of ${totalCount})</span>`
+            : "";
+        header.innerHTML = `<i class="fas fa-image"></i> <strong>${actorName ?? "Token"}</strong> — pick variant${truncNote} <span class="ace-tap-hint">(click • Enter • 1-9 • R random • Esc)</span>`;
         root.appendChild(header);
 
         const grid = document.createElement("div");
@@ -840,7 +906,28 @@ async function _onTokenCreated(tokenDoc, options, userId) {
         try { await rebuildTokenArtIndex(); } catch (err) { console.warn(`${TAG} | Initial index build failed:`, err); }
     }
 
-    const { matches, reason } = _findMatches(actor.name);
+    // ── Settle delay: give ACE Engine's bio + faction pipeline a moment to
+    //    rename the token before we lock in matches. Without this, dropping
+    //    a "Goblin" pops the chooser instantly with only "Goblin" variants
+    //    visible — and a moment later the bio renames the token to "Goblin
+    //    Archer" or assigns a faction role, but the chooser is already
+    //    showing the wrong candidate set.
+    //
+    //    Foundry doesn't expose a "bio pipeline complete" hook from
+    //    ace-engine, but we can poll for a name change in a short window.
+    //    If the name DOES change, we re-fire the match with the new name.
+    //    If not, we proceed with the original name as before.
+    const initialName = tokenDoc.name;
+    const settleDeadline = Date.now() + 4000; // up to 4s
+    while (Date.now() < settleDeadline) {
+        await new Promise(r => setTimeout(r, 250));
+        if (tokenDoc.name !== initialName) {
+            console.log(`${TAG} | Token renamed during settle ("${initialName}" → "${tokenDoc.name}") — matching with new name.`);
+            break;
+        }
+    }
+
+    const { matches, reason } = _findMatches(tokenDoc.name);
 
     console.log(`${TAG} | "${actor.name}" — current="${currentImg}", matches=${matches.length}, reason="${reason}"`);
     if (matches.length) {
