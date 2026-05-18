@@ -72,6 +72,93 @@ const GENERIC_FOLDERS = new Set([
 const SIZE_TOKENS = new Set(["tiny", "small", "medium", "large", "huge", "gargantuan"]);
 const NUMERIC_RE  = /^\d+$|^v\d+$|^\(\d+\)$/i;
 
+// ── Creature families for taxonomic folder matching ───────────────────────
+// When an actor like "Goblin Archer" drops, the engine first tries to find a
+// match inside a folder whose name matches the actor's creature FAMILY
+// (e.g. files inside "goblinoids/" or "goblinoid/" for any goblin-family
+// creature). Only kicks in when multiple matches exist — family-folder
+// matches win over generic-folder matches.
+//
+// Mirrors CREATURE_FAMILIES in ace-engine/scripts/npc/faction-registry.mjs
+// so this module stays self-contained (no cross-module import).
+const CREATURE_FAMILIES = {
+    goblinoid: ["goblin", "hobgoblin", "bugbear"],
+    orcish:    ["orc", "half-orc"],
+    underdark: ["drow", "duergar", "svirfneblin"],
+    undead:    ["skeleton", "zombie", "undead", "wight", "ghoul", "ghost", "wraith", "lich", "vampire"],
+    construct: ["construct", "golem", "homunculus", "scarecrow"],
+    canine:    ["wolf", "worg", "dire wolf", "hyena", "jackal", "dog"],
+    criminal:  ["bandit", "thug", "pirate", "assassin", "cutpurse", "highwayman"],
+    military:  ["guard", "soldier", "knight", "veteran", "captain", "sergeant"],
+    civilian:  ["commoner", "merchant", "priest", "bartender", "barmaid", "innkeeper", "noble", "scholar"],
+    cultist:   ["cultist", "acolyte", "fanatic"],
+    giantkin:  ["giant", "ogre", "ettin", "troll"],
+    fey:       ["dryad", "satyr", "pixie", "sprite", "nymph", "fey"],
+    fiend:     ["devil", "demon", "imp", "succubus", "incubus", "fiend"],
+    elemental: ["elemental", "azer", "myrmidon", "salamander", "magmin"],
+    dragonkin: ["dragon", "wyvern", "drake", "dragonborn", "kobold"],
+    aberration:["aboleth", "mind flayer", "illithid", "beholder", "gibbering"],
+};
+
+// Reverse lookup: creature word → family key
+const _creatureWordToFamily = {};
+for (const [family, members] of Object.entries(CREATURE_FAMILIES)) {
+    for (const m of members) _creatureWordToFamily[m.toLowerCase()] = family;
+}
+
+// Folder name → family key. Accepts singular and common plural / adjective forms.
+const _familyFolderMap = {};
+for (const family of Object.keys(CREATURE_FAMILIES)) {
+    _familyFolderMap[family]        = family;  // "goblinoid"
+    _familyFolderMap[family + "s"]  = family;  // "goblinoids"
+}
+// Pluralization / adjective edge cases (must come AFTER the loop above)
+_familyFolderMap["orc"]       = "orcish";
+_familyFolderMap["orcs"]      = "orcish";
+_familyFolderMap["fey"]       = "fey";        // already singular = plural
+_familyFolderMap["fiends"]    = "fiend";
+_familyFolderMap["fiendish"]  = "fiend";
+_familyFolderMap["undeads"]   = "undead";     // (rare misspelling — accept)
+_familyFolderMap["aberrations"] = "aberration";
+_familyFolderMap["elementals"]  = "elemental";
+_familyFolderMap["dragons"]     = "dragonkin";
+_familyFolderMap["dragonkin"]   = "dragonkin";
+_familyFolderMap["giants"]      = "giantkin";
+_familyFolderMap["giantkin"]    = "giantkin";
+
+/** Detect family folder anywhere in a file's path. Returns the family
+ *  key (e.g. "goblinoid") or null if no parent folder matches. Walks
+ *  from deepest parent to shallowest so the closest family wins. */
+function _detectFamilyFolderInPath(path) {
+    const parts = String(path ?? "").split("/");
+    // Skip the filename itself (last part); walk parents
+    for (let i = parts.length - 2; i >= 0; i--) {
+        const folderName = _normalizeFilename(parts[i]).toLowerCase();
+        if (_familyFolderMap[folderName]) return _familyFolderMap[folderName];
+    }
+    return null;
+}
+
+/** Detect actor's creature family from its name. Scans each whitespace-
+ *  separated token (so "Goblin Archer" finds "goblin" → goblinoid). Also
+ *  checks for two-word creature words like "dire wolf". Returns family key
+ *  or null. */
+function _detectActorFamily(actorName) {
+    const lower = _normalizeFilename(actorName).toLowerCase().trim();
+    if (!lower) return null;
+    // Try multi-word matches first (e.g. "dire wolf")
+    for (const word of Object.keys(_creatureWordToFamily)) {
+        if (word.includes(" ") && lower.includes(word)) {
+            return _creatureWordToFamily[word];
+        }
+    }
+    // Then single-word
+    for (const token of lower.split(/\s+/)) {
+        if (_creatureWordToFamily[token]) return _creatureWordToFamily[token];
+    }
+    return null;
+}
+
 /**
  * Normalize a filename or folder name into a sane lookup string.
  *   • underscores  → spaces
@@ -117,7 +204,21 @@ function _makeEntry({ path, displayBase, displayVariant, fullName }) {
         fullLower: fullName.toLowerCase().trim(),
         variantLower: displayVariant ? displayVariant.toLowerCase().trim() : null,
         keyTokens:    _keyTokensOf(fullName),
+        // Taxonomic-folder marker — set if any parent folder name is a
+        // recognized creature family. Used by _preferFamilyFolder to bump
+        // family-matching art ahead of equally-good non-family matches.
+        familyFolder: _detectFamilyFolderInPath(path),
     };
+}
+
+/** Filter helper — when multiple matches exist and the actor belongs to a
+ *  creature family (goblinoid, undead, etc.), prefer entries whose path
+ *  passes through a folder named after that family. Falls through to ALL
+ *  matches if no family-folder match exists (so we never lose candidates). */
+function _preferFamilyFolder(matches, actorFamily) {
+    if (!actorFamily || !Array.isArray(matches) || matches.length <= 1) return matches;
+    const familyHits = matches.filter(m => m && m.familyFolder === actorFamily);
+    return familyHits.length ? familyHits : matches;
 }
 
 // (The old single-file _parsePath was replaced by the two-pass scan in
@@ -379,6 +480,12 @@ function _findMatches(actorName) {
     const lower = (actorName || "").toLowerCase().trim();
     if (!lower) return { matches: [], reason: "none" };
 
+    // Detect the actor's creature family ("goblin" → goblinoid, "skeleton"
+    // → undead, etc.). Used to bias each match step toward art that lives
+    // inside a taxonomic folder (e.g. NPCs/goblinoids/*). Falls through to
+    // normal behavior when no family or no taxonomic-folder hits exist.
+    const actorFamily = _detectActorFamily(lower);
+
     // 1. Exact full-name match — "Goblin Archer" hits "Goblin - Archer.webp"
     //    OR a single file literally named "Goblin Archer.webp"
     const exact = _index.byFullName.get(lower);
@@ -386,7 +493,7 @@ function _findMatches(actorName) {
 
     // 2. Base-name match — "Goblin" hits all Goblin variants
     const baseHits = _index.byBase.get(lower);
-    if (baseHits?.length) return { matches: baseHits.slice(), reason: "base" };
+    if (baseHits?.length) return { matches: _preferFamilyFolder(baseHits.slice(), actorFamily), reason: "base" };
 
     // 3. Strip modifier prefixes (Conjured/Summoned/Adult/...) and retry
     //    exact + base lookups. Most useful for spell-summoned creatures
@@ -396,7 +503,7 @@ function _findMatches(actorName) {
         const strippedExact = _index.byFullName.get(stripped);
         if (strippedExact) return { matches: [strippedExact], reason: "stripped" };
         const strippedBase = _index.byBase.get(stripped);
-        if (strippedBase?.length) return { matches: strippedBase.slice(), reason: "stripped" };
+        if (strippedBase?.length) return { matches: _preferFamilyFolder(strippedBase.slice(), actorFamily), reason: "stripped" };
     }
 
     // 4. Key-token match — normalize underscores/sizes/numbers and look
@@ -409,7 +516,7 @@ function _findMatches(actorName) {
         const key = _keyTokensOf(candidate);
         if (!key) continue;
         const keyHits = _index.byKey.get(key);
-        if (keyHits?.length) return { matches: keyHits.slice(), reason: "key" };
+        if (keyHits?.length) return { matches: _preferFamilyFolder(keyHits.slice(), actorFamily), reason: "key" };
     }
 
     // 5. Substring fallback — actor "Goblin Boss" might match base "Goblin"
@@ -423,7 +530,18 @@ function _findMatches(actorName) {
     }
     if (bestBase) {
         const hits = _index.byBase.get(bestBase);
-        return { matches: hits.slice(), reason: "substring" };
+        return { matches: _preferFamilyFolder(hits.slice(), actorFamily), reason: "substring" };
+    }
+
+    // 6. Family-folder last-ditch — actor has a known family but no
+    //    name-based match landed (e.g. "Hobgoblin Iron Shadow" with no
+    //    file named that). Scan the index for ANY entry whose path lives
+    //    inside the actor's family folder. Returns those as a "family"
+    //    reason so the chooser can show them. Only fires when family is
+    //    detected — otherwise we just return empty.
+    if (actorFamily) {
+        const familyOnly = _index.all.filter(e => e.familyFolder === actorFamily);
+        if (familyOnly.length) return { matches: familyOnly.slice(), reason: "family" };
     }
 
     return { matches: [], reason: "none" };
