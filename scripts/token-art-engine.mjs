@@ -106,25 +106,39 @@ for (const [family, members] of Object.entries(CREATURE_FAMILIES)) {
     for (const m of members) _creatureWordToFamily[m.toLowerCase()] = family;
 }
 
-// Folder name → family key. Accepts singular and common plural / adjective forms.
+// Folder name → family key. Accepts singular and common plural / adjective
+// forms — AND every individual creature word in CREATURE_FAMILIES. So a
+// folder named "GOBLIN" or "Goblins" maps to the goblinoid family, "DROW"
+// or "Drows" maps to underdark, "SKELETONS" maps to undead, etc. Users
+// rarely name folders after taxonomic families; they name them after
+// creatures. Both work now.
 const _familyFolderMap = {};
-for (const family of Object.keys(CREATURE_FAMILIES)) {
-    _familyFolderMap[family]        = family;  // "goblinoid"
-    _familyFolderMap[family + "s"]  = family;  // "goblinoids"
+for (const [family, members] of Object.entries(CREATURE_FAMILIES)) {
+    _familyFolderMap[family]       = family;  // "goblinoid"
+    _familyFolderMap[family + "s"] = family;  // "goblinoids"
+    for (const m of members) {
+        const mLower = m.toLowerCase();
+        _familyFolderMap[mLower]       = family;  // "goblin"  → goblinoid
+        _familyFolderMap[mLower + "s"] = family;  // "goblins" → goblinoid
+    }
 }
-// Pluralization / adjective edge cases (must come AFTER the loop above)
-_familyFolderMap["orc"]       = "orcish";
-_familyFolderMap["orcs"]      = "orcish";
-_familyFolderMap["fey"]       = "fey";        // already singular = plural
-_familyFolderMap["fiends"]    = "fiend";
-_familyFolderMap["fiendish"]  = "fiend";
-_familyFolderMap["undeads"]   = "undead";     // (rare misspelling — accept)
+// Pluralization / adjective edge cases (must come AFTER the loop above —
+// some override the auto-generated entries).
+_familyFolderMap["orcish"]      = "orcish";
+_familyFolderMap["fey"]         = "fey";
+_familyFolderMap["fiendish"]    = "fiend";
 _familyFolderMap["aberrations"] = "aberration";
-_familyFolderMap["elementals"]  = "elemental";
-_familyFolderMap["dragons"]     = "dragonkin";
 _familyFolderMap["dragonkin"]   = "dragonkin";
-_familyFolderMap["giants"]      = "giantkin";
 _familyFolderMap["giantkin"]    = "giantkin";
+
+/** Decode URL-encoded path segments — Foundry's FilePicker returns paths
+ *  with %20 for spaces, %26 for &, etc. Normalize that before matching
+ *  folder names. Also trims and lowercases. */
+function _decodeAndNormalize(s) {
+    let decoded = String(s ?? "");
+    try { decoded = decodeURIComponent(decoded); } catch (_) { /* malformed — use raw */ }
+    return _normalizeFilename(decoded).toLowerCase();
+}
 
 /** Detect family folder anywhere in a file's path. Returns the family
  *  key (e.g. "goblinoid") or null if no parent folder matches. Walks
@@ -133,7 +147,7 @@ function _detectFamilyFolderInPath(path) {
     const parts = String(path ?? "").split("/");
     // Skip the filename itself (last part); walk parents
     for (let i = parts.length - 2; i >= 0; i--) {
-        const folderName = _normalizeFilename(parts[i]).toLowerCase();
+        const folderName = _decodeAndNormalize(parts[i]);
         if (_familyFolderMap[folderName]) return _familyFolderMap[folderName];
     }
     return null;
