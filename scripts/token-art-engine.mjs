@@ -861,7 +861,7 @@ function _dismissActiveChooser() {
 // Maximum thumbnails to surface in the chooser at once. Above this, the
 // chooser pages OR truncates — current behavior is truncate-with-note so
 // the GM isn't faced with hundreds of identical-looking goblins.
-const CHOOSER_MAX_DISPLAYED = 12;
+const CHOOSER_MAX_DISPLAYED = 15;
 
 /**
  * Pop a lightweight thumbnail chooser near the placed token. Resolves with
@@ -934,6 +934,30 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
         header.innerHTML = `<i class="fas fa-image"></i> <strong>${actorName ?? "Token"}</strong> — pick variant${truncNote} <span class="ace-tap-hint">(click • Enter • 1-9 • R random • Esc)</span>`;
         root.appendChild(header);
 
+        // Derive a useful label per match: prefer explicit displayVariant;
+        // otherwise compute the difference between the actor name and the
+        // file's base/full name. So actor "Goblin" matching file "Goblin
+        // Boss.webp" (which indexed as base="Goblin Boss" variant=null)
+        // shows "Boss" as the label, not the unhelpful "Base."
+        const actorLower = String(actorName ?? "").toLowerCase().trim();
+        const cleanedLower = _stripActorNameNoise(actorLower) || actorLower;
+        const labelFor = (m) => {
+            if (m.displayVariant) return m.displayVariant;
+            // Strip the actor name (cleaned) from the front of the file's
+            // base/full name. What remains is the variant in its display
+            // capitalization.
+            const tryStrip = (display) => {
+                const lower = display.toLowerCase();
+                if (lower.startsWith(cleanedLower + " ")) {
+                    return display.slice(cleanedLower.length).trim();
+                }
+                return null;
+            };
+            return tryStrip(m.displayBase)
+                ?? tryStrip(m.fullName)
+                ?? "Base";
+        };
+
         const grid = document.createElement("div");
         grid.className = "ace-tap-grid";
         matches.forEach((m, i) => {
@@ -941,9 +965,10 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
             thumb.className = "ace-tap-thumb" + (i === highlightIdx ? " is-highlight" : "");
             thumb.dataset.idx = String(i);
             thumb.tabIndex = 0;
+            const label = labelFor(m);
             thumb.innerHTML = `
                 <img src="${m.path}" alt="${m.displayBase}${m.displayVariant ? " — " + m.displayVariant : ""}" />
-                <div class="ace-tap-thumb-label">${m.displayVariant ?? "Base"}</div>
+                <div class="ace-tap-thumb-label">${label}</div>
                 ${i < 9 ? `<div class="ace-tap-thumb-key">${i + 1}</div>` : ""}
             `;
             thumb.addEventListener("click", (ev) => {
@@ -980,7 +1005,7 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
                 return;
             }
             const sec = Math.max(0, Math.ceil(remainingMs / 1000));
-            const variantLabel = matches[highlightIdx]?.displayVariant ?? "Base";
+            const variantLabel = labelFor(matches[highlightIdx] ?? {});
             footer.textContent = isPaused
                 ? `Paused (mouse over) — "${variantLabel}" will be used after ${sec}s`
                 : `Auto-uses "${variantLabel}" in ${sec}s`;

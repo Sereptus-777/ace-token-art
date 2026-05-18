@@ -116,19 +116,19 @@
   transform: translateY(-2px);
 }
 .ace-tap-thumb img {
-  width: 80px;
-  height: 80px;
+  width: 88px;
+  height: 88px;
   border-radius: 4px;
   object-fit: cover;
   border: 1px solid rgba(0, 0, 0, 0.5);
   pointer-events: none;
 }
 .ace-tap-thumb-label {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: #f0e4c0;
   text-align: center;
-  max-width: 92px;
+  max-width: 100px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
