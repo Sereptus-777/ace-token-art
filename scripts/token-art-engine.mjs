@@ -1135,12 +1135,17 @@ async function _shouldWaitForBio(tokenDoc) {
         // run — the picker fired instantly with stale data instead of waiting
         // for the new bio to finish.
         //
-        // New logic: wait if a bio is CURRENTLY in-flight (an `bioInFlight`
-        // flag the pipeline sets at start and clears at end), OR if the bio
-        // has never been generated. This handles both first-time and re-spawn
-        // cases correctly. The 10-min hard cutoff in _waitForBio is the
-        // safety net for any case where the in-flight flag gets stuck.
-        const inFlight = !!tokenDoc.actor?.getFlag?.("ace-engine", "bioInFlight");
+        // Wait if a bio is CURRENTLY in-flight (an `bioInFlight` flag the
+        // pipeline sets at start and clears at end), OR if the bio has
+        // never been generated. Cross-module staleness-safe: prefer the
+        // engine API's `isBioInFlight()` which respects the 5-minute
+        // staleness cutoff (so a crash-orphaned flag doesn't block art
+        // forever mid-session). Falls back to the raw boolean if engine
+        // didn't expose its API (older engine versions).
+        const engineApi = game.modules?.get?.("ace-engine")?.api;
+        const inFlight = typeof engineApi?.isBioInFlight === "function"
+            ? engineApi.isBioInFlight(tokenDoc.actor)
+            : !!tokenDoc.actor?.getFlag?.("ace-engine", "bioInFlight");
         const everGenerated = !!tokenDoc.actor?.getFlag?.("ace-engine", "bioGenerated");
         if (inFlight) return true;
         if (!everGenerated) return true;
