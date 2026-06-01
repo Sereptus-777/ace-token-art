@@ -1127,10 +1127,25 @@ async function _shouldWaitForBio(tokenDoc) {
         // Non-sentient creatures: bio runs but produces no rename / role
         const creatureType = String(tokenDoc.actor?.system?.details?.type?.value ?? "").toLowerCase();
         if (NO_RENAME_TYPES.has(creatureType)) return false;
-        // If actor already has bioGenerated flag set, pipeline has already
-        // run (or skipped) — no need to wait.
-        if (tokenDoc.actor?.getFlag?.("ace-engine", "bioGenerated")) return false;
-        return true;
+
+        // ── Wait detection — was: skip-if-ever-generated; now: wait-if-in-flight ──
+        // The previous logic checked `bioGenerated` (a permanent flag set after
+        // the FIRST bio ever) and returned false thereafter. That broke the
+        // chooser whenever a GM re-pulled an actor whose bio had previously
+        // run — the picker fired instantly with stale data instead of waiting
+        // for the new bio to finish.
+        //
+        // New logic: wait if a bio is CURRENTLY in-flight (an `bioInFlight`
+        // flag the pipeline sets at start and clears at end), OR if the bio
+        // has never been generated. This handles both first-time and re-spawn
+        // cases correctly. The 10-min hard cutoff in _waitForBio is the
+        // safety net for any case where the in-flight flag gets stuck.
+        const inFlight = !!tokenDoc.actor?.getFlag?.("ace-engine", "bioInFlight");
+        const everGenerated = !!tokenDoc.actor?.getFlag?.("ace-engine", "bioGenerated");
+        if (inFlight) return true;
+        if (!everGenerated) return true;
+        // Ever generated AND not in-flight: bio is done, no need to wait
+        return false;
     } catch (_) {
         return false;  // any error → don't block, fire immediately
     }
