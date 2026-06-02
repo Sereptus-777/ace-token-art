@@ -1170,7 +1170,12 @@ async function _shouldWaitForBio(tokenDoc) {
  *      hang the chooser literally forever
  */
 async function _waitForBio(tokenDoc) {
-    const HARD_CUTOFF_MS = 10 * 60 * 1000;  // 10 minutes — sanity net only
+    // 60s timeout — dropped from 10 minutes per Johnny 2026-05-31. 10 min
+    // was originally a sanity net for slow AI providers, but in practice
+    // a bio that takes >60s is broken anyway (provider down, network
+    // wedged, model overloaded). Better to fail fast with a friendly
+    // notice and let the user retry than to hang the spawn for 10 min.
+    const HARD_CUTOFF_MS = 60 * 1000;
     const POLL_INTERVAL_MS = 500;
     const TOAST_DELAY_MS = 2000;
     const t0 = Date.now();
@@ -1217,7 +1222,13 @@ async function _waitForBio(tokenDoc) {
 
         const elapsed = Date.now() - t0;
         if (winner === "timeout") {
-            console.warn(`${TAG} | Bio wait hit 10-minute safety cutoff — proceeding with current actor data.`);
+            console.warn(`${TAG} | Bio wait hit 60-second timeout — proceeding with current actor data. Likely cause: AI provider down/unreachable, or bio generation is broken for this actor.`);
+            try {
+                ui.notifications?.warn(
+                    `ACE: Token Art — bio generation didn't finish within 60s for "${tokenDoc.actor?.name ?? "this token"}". Proceeding with current data. Check ACE Engine's AI provider settings if this happens repeatedly.`,
+                    { permanent: false }
+                );
+            } catch (_) { /* non-fatal */ }
         } else {
             console.log(`${TAG} | Bio wait complete in ${elapsed}ms via ${winner}.`);
         }
