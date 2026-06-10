@@ -12,6 +12,7 @@ import {
     activateTokenArtEngine,
     rebuildTokenArtIndex,
     getTokenArtIndex,
+    auditAndRepairTokenPaths,
 } from "./token-art-engine.mjs";
 
 export const MODULE_ID = "ace-token-art";
@@ -131,6 +132,32 @@ function _registerSettings() {
         config: true,
     });
 
+    // Curation mode: re-show the chooser even when the token already wears
+    // valid folder art, so the GM can deliberately re-pick a variant. Default
+    // OFF (most tables want "already good" to mean "leave it"); turn ON during
+    // a curation pass where you're assigning a permanent variant per creature.
+    s("tokenArtAlwaysChoose", {
+        scope: "world",
+        name: "Always Show Chooser (even if art is already set)",
+        hint: "When ON, dropping a token whose image is already one of your folder variants STILL pops the chooser, so you can re-pick. Useful while you're curating which variant each creature should use. When OFF (default), tokens that already wear valid folder art are left alone.",
+        type: Boolean,
+        default: false,
+        config: true,
+    });
+
+    // Load-time path-integrity / self-heal. When ON (default), on world load
+    // the engine checks token image paths and repairs any that broke because a
+    // folder was renamed/moved/deleted — re-pointing them at the moved file or
+    // a fresh match, silently, so you never see a Mystery Man after reorganizing.
+    s("tokenArtRepairOnLoad", {
+        scope: "world",
+        name: "Auto-Repair Broken Art Paths on Load",
+        hint: "When ON (default), each time the world loads the engine verifies token art still resolves to real files and silently fixes any that broke when you renamed, moved, or deleted a folder — preferring the same file at its new location so your exact picks survive. A one-line summary tells you how many it fixed. Turn off only if you want stale paths left exactly as-is.",
+        type: Boolean,
+        default: true,
+        config: true,
+    });
+
     s("tokenArtRecentChoices", {
         scope: "world",
         config: false,
@@ -162,9 +189,18 @@ Hooks.once("ready", async () => {
     try { await _migrateLegacySettings(); }
     catch (err) { console.warn(`${MODULE_ID} | Legacy migration failed (non-fatal):`, err); }
 
-    // Activate the engine
-    try { activateTokenArtEngine(); }
+    // Activate the engine (await the initial index build so the audit below
+    // runs against a ready index).
+    try { await activateTokenArtEngine(); }
     catch (err) { console.warn(`${MODULE_ID} | Activation failed:`, err); }
+
+    // Load-time path-integrity / self-heal pass — repair any token art paths
+    // that broke since last session (renamed/moved/deleted folders). Silent
+    // auto-repair with a one-line summary. Backgrounded so it never delays the
+    // ready hook; gated internally by tokenArtRepairOnLoad (default ON).
+    auditAndRepairTokenPaths().catch(err =>
+        console.warn(`${MODULE_ID} | Path-integrity audit failed (non-fatal):`, err)
+    );
 
     // Expose API
     const mod = game.modules.get(MODULE_ID);
@@ -190,6 +226,12 @@ Hooks.once("ready", async () => {
             },
             /** Inspect the current in-memory index (for debugging). */
             getTokenArtIndex,
+            /**
+             * Re-run the path-integrity / self-heal pass on demand (repairs
+             * broken art paths across actors + the current scene). Returns
+             * { checked, dead, repaired, unresolved }.
+             */
+            repairTokenArt: async (opts = {}) => auditAndRepairTokenPaths(opts),
             /** Substring search for "where's my art for X?" debugging. */
             searchTokenArt: (query) => {
                 const idx = getTokenArtIndex();

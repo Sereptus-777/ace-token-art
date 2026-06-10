@@ -27,7 +27,7 @@ import { MODULE_ID } from "./ace-token-art.mjs";
 const TAG = "ACE: Token Art";
 const IMG_EXT_RE = /\.(webp|png|jpg|jpeg|svg|gif|avif)$/i;
 const VARIANT_SEP = / - /;          // " - " — what splits base from variant
-const CHOOSER_TIMEOUT_MS = 10000;    // 10s auto-dismiss for non-first-time picks
+// CHOOSER_TIMEOUT_MS removed v0.7.21 — chooser waits indefinitely for explicit pick.
 
 // ─── In-memory index ───────────────────────────────────────────────────────
 // Built on world load + on demand via rescan. Cleared and re-built atomically.
@@ -239,14 +239,25 @@ function _makeEntry({ path, displayBase, displayVariant, fullName }) {
     };
 }
 
-/** Filter helper — when multiple matches exist and the actor belongs to a
- *  creature family (goblinoid, undead, etc.), prefer entries whose path
- *  passes through a folder named after that family. Falls through to ALL
- *  matches if no family-folder match exists (so we never lose candidates). */
+/** Rank helper — when multiple matches exist and the actor belongs to a
+ *  creature family (goblinoid, undead, etc.), RANK family-folder entries
+ *  first but keep ALL matches visible in the chooser.
+ *
+ *  v0.7.21: previously FILTERED non-family-folder matches OUT entirely.
+ *  That hid the user's custom token variants (e.g. 20 hand-curated goblin
+ *  variants in his own folder) whenever an SRD pack happened to have a
+ *  single file inside a "goblinoid" category folder. The SRD entry would
+ *  win and all custom variants disappeared from the chooser.
+ *
+ *  Per Johnny 2026-06-09: "I've got Goblin Archer, Goblin Warrior, Goblin
+ *  Hexer, Goblin Boss, Goblin on a Dog... yet it still only sometimes
+ *  comes up with only one image." Root cause was this filter. */
 function _preferFamilyFolder(matches, actorFamily) {
     if (!actorFamily || !Array.isArray(matches) || matches.length <= 1) return matches;
     const familyHits = matches.filter(m => m && m.familyFolder === actorFamily);
-    return familyHits.length ? familyHits : matches;
+    if (!familyHits.length) return matches;
+    const others = matches.filter(m => m && m.familyFolder !== actorFamily);
+    return [...familyHits, ...others];
 }
 
 // (The old single-file _parsePath was replaced by the two-pass scan in
@@ -783,9 +794,45 @@ function _findMatches(actorName) {
             bestBase = base;
         }
     }
-    if (bestBase) {
-        const hits = _index.byBase.get(bestBase);
-        return { matches: _preferFamilyFolder(hits.slice(), actorFamily), reason: "substring" };
+    const substringHits = bestBase ? _index.byBase.get(bestBase).slice() : [];
+
+    // 5b. Species-token broadening — when the actor name has multiple
+    //     tokens AND one of them is a recognized creature word
+    //     (goblin/orc/wolf/etc.), surface EVERY indexed file whose path
+    //     or name contains that creature word — regardless of folder
+    //     location. Fixes: actor "Goblin Minion" with 19 indexed goblin
+    //     variants (Goblin-Warrior-1.webp, Goblin-Boss.webp, ...) used to
+    //     return only the 8 files that happened to live in a parent
+    //     folder named "GOBLIN". Now ALL 19 surface, scattered or not.
+    //     Added 2026-06-09 — same session that fixed the chooser cap
+    //     and family-folder filter regressions.
+    const lowerTokens = lower.split(/\s+/).filter(Boolean);
+    const creatureToken = lowerTokens.find(t => _creatureWordToFamily[t]);
+    let speciesHits = [];
+    if (creatureToken && lowerTokens.length > 1) {
+        speciesHits = _index.all.filter(e =>
+            e.baseLower.includes(creatureToken) || e.fullLower.includes(creatureToken)
+        );
+    }
+
+    // Merge step-5 substring + step-5b species, dedup by path. Substring
+    // matches rank first (more specific), species matches second.
+    if (substringHits.length || speciesHits.length) {
+        const seenPaths = new Set();
+        const merged = [];
+        for (const e of substringHits) {
+            if (!seenPaths.has(e.path)) { seenPaths.add(e.path); merged.push(e); }
+        }
+        for (const e of speciesHits) {
+            if (!seenPaths.has(e.path)) { seenPaths.add(e.path); merged.push(e); }
+        }
+        const reasonParts = [];
+        if (substringHits.length) reasonParts.push("substring");
+        if (speciesHits.length)   reasonParts.push(`species:${creatureToken}`);
+        return {
+            matches: _preferFamilyFolder(merged, actorFamily),
+            reason: reasonParts.join("+"),
+        };
     }
 
     // 6. Family-folder last-ditch — actor has a known family but no
@@ -809,6 +856,145 @@ function _imageIsInUserFolders(imgPath) {
     try { folders = game.settings.get(MODULE_ID, "tokenArtFolders") ?? []; }
     catch (_) { return false; }
     return folders.some(f => f && imgPath.startsWith(f));
+}
+
+// ─── Path-integrity helpers (v1.0.3) ───────────────────────────────────────
+// A token whose image path startsWith a configured folder LOOKS like our art,
+// but the file can still be gone (folder renamed, file moved/deleted) — in
+// which case Foundry shows the Mystery Man. These helpers detect dead links
+// and the load-time audit repairs them.
+
+/** Does this image path resolve to a real file on the server? (HTTP HEAD) */
+async function _fileExists(path) {
+    if (!path) return false;
+    try {
+        const route = foundry.utils.getRoute(path);
+        const r = await fetch(route, { method: "HEAD" });
+        return r.ok;
+    } catch (_) { return false; }
+}
+
+/** Last path segment — "NPCs/goblin/Bugbear-Warrior-11.png" → "Bugbear-Warrior-11.png". */
+function _basename(p) { return String(p ?? "").split("/").pop() ?? ""; }
+
+/** Evenly-spaced sample of up to n items (no RNG — deterministic). */
+function _sampleArray(arr, n) {
+    if (arr.length <= n) return arr.slice();
+    const step = Math.max(1, Math.floor(arr.length / n));
+    const out = [];
+    for (let i = 0; i < arr.length && out.length < n; i += step) out.push(arr[i]);
+    return out;
+}
+
+/** Run an async fn over items with a bounded concurrency. */
+async function _batchedForEach(items, concurrency, fn) {
+    for (let i = 0; i < items.length; i += concurrency) {
+        await Promise.all(items.slice(i, i + concurrency).map(fn));
+    }
+}
+
+/**
+ * Load-time path-integrity pass. RAW of Johnny's request: "when I loaded the
+ * world it should have checked the paths." Two stages:
+ *
+ *   1. Cache-staleness check — the index is loaded from a cache keyed on the
+ *      top-level folder LIST, so renaming a SUBfolder (GOBLINOIDS → goblin)
+ *      doesn't invalidate it. We sample a handful of indexed files; if a real
+ *      fraction are missing, the cache is stale → rescan fresh.
+ *   2. Token repair — scan every actor's prototype token + the current scene's
+ *      placed tokens for images that should be folder art but no longer resolve.
+ *      Repair each: FIRST look for the same filename elsewhere in the current
+ *      folders (the file just moved → exact curated variant preserved); if it's
+ *      truly gone, re-match by the actor's name and take the best available.
+ *
+ * Silent by design (GM chose auto-repair) with a one-line summary toast.
+ * Gated by `tokenArtEnabled` + `tokenArtRepairOnLoad` (default ON).
+ *
+ * @returns {Promise<{checked:number, dead:number, repaired:number, unresolved:number}>}
+ */
+export async function auditAndRepairTokenPaths({ silent = false } = {}) {
+    const result = { checked: 0, dead: 0, repaired: 0, unresolved: 0 };
+    if (!game.user?.isGM) return result;
+    try { if (!game.settings.get(MODULE_ID, "tokenArtEnabled")) return result; } catch (_) {}
+    try { if (game.settings.get(MODULE_ID, "tokenArtRepairOnLoad") === false) return result; } catch (_) {}
+
+    // Track whether we've already paid for one fresh (non-cache) rescan so we
+    // never scan the whole folder tree twice in a single audit.
+    let freshIndex = false;
+
+    // ── Stage 1: detect a stale cache and rescan fresh if needed ──
+    try {
+        if (_index.ready && _index.all.length) {
+            const sample = _sampleArray(_index.all, 15);
+            let missing = 0;
+            await _batchedForEach(sample, 8, async (e) => { if (!(await _fileExists(e.path))) missing++; });
+            if (missing >= Math.ceil(sample.length * 0.2)) {
+                console.log(`${TAG} | Cache looks stale (${missing}/${sample.length} sampled files missing) — rescanning fresh.`);
+                await rebuildTokenArtIndex({ useCache: false, silent: true });
+                freshIndex = true;
+            }
+        }
+    } catch (err) { console.warn(`${TAG} | Cache-staleness check failed (non-fatal):`, err); }
+
+    // ── Stage 2: gather candidate folder-art images (prototype + scene) ──
+    const targets = [];
+    for (const actor of game.actors ?? []) {
+        const img = actor.prototypeToken?.texture?.src ?? "";
+        if (_imageIsInUserFolders(img)) targets.push({ isProto: true, actor, name: actor.name, img });
+    }
+    for (const tok of canvas.scene?.tokens ?? []) {
+        const img = tok.texture?.src ?? "";
+        if (_imageIsInUserFolders(img)) targets.push({ isProto: false, tokenDoc: tok, actor: tok.actor, name: tok.name ?? tok.actor?.name, img });
+    }
+    result.checked = targets.length;
+    if (!targets.length) return result;
+
+    // Existence-check unique paths (HTTP, batched).
+    const uniquePaths = [...new Set(targets.map(t => t.img))];
+    const deadSet = new Set();
+    await _batchedForEach(uniquePaths, 8, async (p) => { if (!(await _fileExists(p))) deadSet.add(p); });
+    const dead = targets.filter(t => deadSet.has(t.img));
+    result.dead = dead.length;
+    if (!dead.length) return result;
+
+    // Dead links exist → make sure the index is fresh before re-matching, but
+    // skip if Stage 1 already rescanned (don't scan the tree twice).
+    if (!freshIndex) {
+        try { await rebuildTokenArtIndex({ useCache: false, silent: true }); freshIndex = true; }
+        catch (err) { console.warn(`${TAG} | Pre-repair rescan failed:`, err); }
+    }
+
+    // Same-filename lookup (file moved → preserve the exact curated variant).
+    const byBasename = new Map();
+    for (const e of _index.all) {
+        const bn = _basename(e.path).toLowerCase();
+        if (!byBasename.has(bn)) byBasename.set(bn, e);
+    }
+
+    for (const t of dead) {
+        let entry = byBasename.get(_basename(t.img).toLowerCase());
+        if (!entry) {
+            // Exact file gone — re-match by the actor's name, take the best.
+            try { entry = _findMatches(t.actor?.name ?? t.name ?? "").matches?.[0] ?? null; }
+            catch (_) { entry = null; }
+        }
+        if (!entry) { result.unresolved++; continue; }
+        try {
+            if (t.isProto) await t.actor.update({ "prototypeToken.texture.src": entry.path }, { aceTokenArtRepair: true });
+            else           await t.tokenDoc.update({ "texture.src": entry.path }, { aceTokenArtRepair: true });
+            result.repaired++;
+        } catch (err) {
+            console.warn(`${TAG} | Repair failed for "${t.name}":`, err);
+            result.unresolved++;
+        }
+    }
+
+    console.log(`${TAG} | Path audit: ${result.checked} folder-art images, ${result.dead} dead, ${result.repaired} repaired, ${result.unresolved} unresolved.`);
+    if (!silent && (result.repaired || result.unresolved)) {
+        const tail = result.unresolved ? ` (${result.unresolved} couldn't be matched — art not found in your folders)` : "";
+        ui.notifications?.info(`ACE: Token Art repaired ${result.repaired} broken image path${result.repaired === 1 ? "" : "s"} after folder changes${tail}.`);
+    }
+    return result;
 }
 
 // ─── Recent-choices memory (so repeated drops pre-highlight last pick) ─────
@@ -859,9 +1045,10 @@ function _dismissActiveChooser() {
 }
 
 // Maximum thumbnails to surface in the chooser at once. Above this, the
-// chooser pages OR truncates — current behavior is truncate-with-note so
-// the GM isn't faced with hundreds of identical-looking goblins.
-const CHOOSER_MAX_DISPLAYED = 15;
+// chooser truncates with a "showing top N of M" note. v0.7.21: bumped
+// from 15 → 50 because GMs with curated variant collections (e.g. 20+
+// goblins) were getting silently truncated to 15. Per Johnny 2026-06-09.
+const CHOOSER_MAX_DISPLAYED = 50;
 
 /**
  * Pop a lightweight thumbnail chooser near the placed token. Resolves with
@@ -912,10 +1099,9 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
         }
 
         // Determine highlight index from recent-choices memory.
-        // isFirstTimePick = no remembered choice for this creature in this
-        // world → user has never seen these variants before → no auto-pick
-        // timer at all (wait for explicit input).
-        const isFirstTimePick = !lastPath;
+        // v0.7.21: previously used `isFirstTimePick` to disable the auto-pick
+        // timer for never-seen creatures. The auto-pick timer is gone entirely
+        // now, so this flag isn't needed — every pick is explicit.
         let highlightIdx = matches.findIndex(m => m.path === lastPath);
         if (highlightIdx < 0) highlightIdx = 0;
 
@@ -994,21 +1180,14 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
         root.focus();
 
         let settled = false;
-        let tickId = null;
-        let remainingMs = CHOOSER_TIMEOUT_MS;
-        let lastTickTime = Date.now();
-        let isPaused = false;
-
+        // v0.7.21: countdown timer REMOVED entirely. Per Johnny 2026-06-09 —
+        // "I don't want a timer on it either. I don't want it saying, 'okay,
+        // you got to pick one of these, or else it's just gonna pick one for
+        // me.'" Chooser now waits indefinitely for an explicit pick
+        // (click / Enter / 1-9 / R / Escape). No auto-pick.
         const updateFooter = () => {
-            if (isFirstTimePick) {
-                footer.textContent = `First time picking for "${actorName}" — take your time.`;
-                return;
-            }
-            const sec = Math.max(0, Math.ceil(remainingMs / 1000));
             const variantLabel = labelFor(matches[highlightIdx] ?? {});
-            footer.textContent = isPaused
-                ? `Paused (mouse over) — "${variantLabel}" will be used after ${sec}s`
-                : `Auto-uses "${variantLabel}" in ${sec}s`;
+            footer.textContent = `Highlighted: "${variantLabel}" — click or press Enter to use, R for random, Esc/click-outside to accept highlight.`;
         };
 
         const finish = (entry) => {
@@ -1019,7 +1198,7 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
         };
 
         const cleanup = () => {
-            if (tickId) clearInterval(tickId);
+            // v0.7.21: tickId/setInterval removed — no countdown timer to clear.
             document.removeEventListener("keydown", onKey, true);
             document.removeEventListener("mousedown", onOutsideClick, true);
             _dismissActiveChooser();
@@ -1056,52 +1235,12 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
         };
         document.addEventListener("mousedown", onOutsideClick, true);
 
-        // Pause/resume the timer based on mouse hover over the chooser. So
-        // just LOOKING at the thumbnails doesn't burn the clock — the
-        // countdown only ticks when your mouse is outside.
-        root.addEventListener("mouseenter", () => {
-            if (isFirstTimePick) return;
-            isPaused = true;
-            updateFooter();
-        });
-        root.addEventListener("mouseleave", () => {
-            if (isFirstTimePick) return;
-            isPaused = false;
-            lastTickTime = Date.now();
-            updateFooter();
-        });
-        // After one frame, check if mouse is ALREADY inside the chooser
-        // (common — chooser pops where the token was dropped). If so,
-        // start paused so the user doesn't lose seconds before the
-        // mouseenter event ever has a chance to fire.
-        requestAnimationFrame(() => {
-            try {
-                if (!isFirstTimePick && root.matches(":hover")) {
-                    isPaused = true;
-                    updateFooter();
-                }
-            } catch (_) {}
-        });
+        // v0.7.21: mouseenter/mouseleave pause logic + setInterval countdown
+        // REMOVED. No timer means no need to pause/resume. The chooser just
+        // sits there waiting for the GM to pick. (Audit 2026-06-09.)
 
         // Show the initial footer
         updateFooter();
-
-        // Start the timer — but only for non-first-time picks
-        if (!isFirstTimePick) {
-            tickId = setInterval(() => {
-                const now = Date.now();
-                const delta = now - lastTickTime;
-                lastTickTime = now;
-                if (isPaused) return;
-                remainingMs -= delta;
-                if (remainingMs <= 0) {
-                    clearInterval(tickId);
-                    finish(matches[highlightIdx]);
-                    return;
-                }
-                updateFooter();
-            }, 250);
-        }
     });
 }
 
@@ -1129,26 +1268,36 @@ async function _shouldWaitForBio(tokenDoc) {
         if (NO_RENAME_TYPES.has(creatureType)) return false;
 
         // ── Wait detection — was: skip-if-ever-generated; now: wait-if-in-flight ──
-        // The previous logic checked `bioGenerated` (a permanent flag set after
-        // the FIRST bio ever) and returned false thereafter. That broke the
-        // chooser whenever a GM re-pulled an actor whose bio had previously
-        // run — the picker fired instantly with stale data instead of waiting
-        // for the new bio to finish.
+        // v0.7.21: pass tokenDoc to isBioInFlight so the engine's synchronous
+        // in-memory tracker (_inFlightTokenIds) closes the race window between
+        // bio-generator's addToBioQueue and its async setFlag commit.
+        // (Audit-mandated 2026-06-08 — Grok pre-launch audit, Critical #4.)
         //
-        // Wait if a bio is CURRENTLY in-flight (an `bioInFlight` flag the
-        // pipeline sets at start and clears at end), OR if the bio has
-        // never been generated. Cross-module staleness-safe: prefer the
-        // engine API's `isBioInFlight()` which respects the 5-minute
-        // staleness cutoff (so a crash-orphaned flag doesn't block art
-        // forever mid-session). Falls back to the raw boolean if engine
-        // didn't expose its API (older engine versions).
+        // Wait if a bio is CURRENTLY in-flight (engine's queue knows about it),
+        // OR if the bio has never been generated. Cross-module staleness-safe:
+        // prefer the engine API's `isBioInFlight()` which respects the 5-minute
+        // staleness cutoff (so a crash-orphaned flag doesn't block art forever).
+        // Falls back to the raw boolean if engine didn't expose its API.
         const engineApi = game.modules?.get?.("ace-engine")?.api;
         const inFlight = typeof engineApi?.isBioInFlight === "function"
-            ? engineApi.isBioInFlight(tokenDoc.actor)
+            ? engineApi.isBioInFlight(tokenDoc.actor, tokenDoc)
             : !!tokenDoc.actor?.getFlag?.("ace-engine", "bioInFlight");
         const everGenerated = !!tokenDoc.actor?.getFlag?.("ace-engine", "bioGenerated");
         if (inFlight) return true;
         if (!everGenerated) return true;
+
+        // ── Last-resort retry for the async-flag race ──
+        // If we got inFlight=false but bio-generator's queue hook hasn't yet
+        // fired for this token, retry ONCE after a brief delay. Belt+suspenders
+        // — the sync _inFlightTokenIds check should already catch this, but on
+        // older engine versions that lack the sync set, this retry covers the
+        // gap. Capped at one retry so we don't hang the chooser indefinitely.
+        await new Promise(r => setTimeout(r, 120));
+        const inFlight2 = typeof engineApi?.isBioInFlight === "function"
+            ? engineApi.isBioInFlight(tokenDoc.actor, tokenDoc)
+            : !!tokenDoc.actor?.getFlag?.("ace-engine", "bioInFlight");
+        if (inFlight2) return true;
+
         // Ever generated AND not in-flight: bio is done, no need to wait
         return false;
     } catch (_) {
@@ -1170,16 +1319,18 @@ async function _shouldWaitForBio(tokenDoc) {
  *      hang the chooser literally forever
  */
 async function _waitForBio(tokenDoc) {
-    // 60s timeout — dropped from 10 minutes per Johnny 2026-05-31. 10 min
-    // was originally a sanity net for slow AI providers, but in practice
-    // a bio that takes >60s is broken anyway (provider down, network
-    // wedged, model overloaded). Better to fail fast with a friendly
-    // notice and let the user retry than to hang the spawn for 10 min.
-    const HARD_CUTOFF_MS = 60 * 1000;
+    // v0.7.21: NO HARD CUTOFF. Per Johnny 2026-06-09 — the GM takes as long
+    // as they take to pick the faction in the NPC Identity Dialog, and the
+    // chooser must NOT auto-proceed with stale data. Previously the 60s
+    // cutoff fired while the GM was mid-dialog, then token-art would show a
+    // generic non-faction-aware variant. Wait indefinitely for either the
+    // bioComplete hook or the bioGenerated flag.
+    //
+    // Safety net: if the user genuinely wants to cancel (e.g. AI provider
+    // is down), they delete the token. There's no auto-proceed.
     const POLL_INTERVAL_MS = 500;
     const TOAST_DELAY_MS = 2000;
     const t0 = Date.now();
-    const deadline = t0 + HARD_CUTOFF_MS;
 
     let waitToast = null;
     const tokenId = tokenDoc.id;
@@ -1196,22 +1347,22 @@ async function _waitForBio(tokenDoc) {
     });
 
     try {
-        // Race the hook against a polling loop (for the case where the
-        // pipeline doesn't fire the hook but still flips the flag — e.g.
-        // older ace-engine versions, or unusual code paths).
+        // Race the hook against a polling loop (no time cap — runs until
+        // the flag flips OR the hook fires, whichever first).
         const pollPromise = (async () => {
-            while (Date.now() < deadline) {
+            while (true) {
                 await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
                 if (tokenDoc.actor?.getFlag?.("ace-engine", "bioGenerated")) return "flag";
+                // If the token gets deleted while we wait, bail
+                if (!tokenDoc.parent || !canvas.scene?.tokens?.get?.(tokenId)) return "token-deleted";
             }
-            return "timeout";
         })();
 
-        // Toast after 2s of waiting (whichever signal wins, this fires once)
+        // Toast after 2s of waiting so the GM knows we're waiting on purpose
         const toastTimer = setTimeout(() => {
             try {
                 waitToast = ui.notifications?.info?.(
-                    `ACE: Token Art — waiting for bio/faction setup before showing variants… (will wait until pipeline finishes)`,
+                    `ACE: Token Art — waiting for bio + faction setup to finish before showing variants… (no time limit)`,
                     { permanent: true }
                 );
             } catch (_) { /* non-fatal */ }
@@ -1221,14 +1372,8 @@ async function _waitForBio(tokenDoc) {
         clearTimeout(toastTimer);
 
         const elapsed = Date.now() - t0;
-        if (winner === "timeout") {
-            console.warn(`${TAG} | Bio wait hit 60-second timeout — proceeding with current actor data. Likely cause: AI provider down/unreachable, or bio generation is broken for this actor.`);
-            try {
-                ui.notifications?.warn(
-                    `ACE: Token Art — bio generation didn't finish within 60s for "${tokenDoc.actor?.name ?? "this token"}". Proceeding with current data. Check ACE Engine's AI provider settings if this happens repeatedly.`,
-                    { permanent: false }
-                );
-            } catch (_) { /* non-fatal */ }
+        if (winner === "token-deleted") {
+            console.log(`${TAG} | Bio wait aborted after ${elapsed}ms — token was deleted.`);
         } else {
             console.log(`${TAG} | Bio wait complete in ${elapsed}ms via ${winner}.`);
         }
@@ -1255,11 +1400,24 @@ async function _onTokenCreated(tokenDoc, options, userId) {
         if (actor.getFlag(MODULE_ID, "skipAutoArt")) return;
     } catch (_) {}
 
-    // Already user art — leave alone
+    // Already user art? — but VERIFY the file actually exists. A renamed,
+    // moved, or deleted folder leaves a path that still startsWith a configured
+    // folder yet 404s (shows the Mystery Man). That is NOT "already good" — fall
+    // through and re-match to self-heal. And when the Always-Choose setting is
+    // on, re-show the chooser even for valid art so the GM can re-pick during a
+    // curation pass. (v1.0.3)
     const currentImg = tokenDoc.texture?.src ?? "";
+    let alwaysChoose = false;
+    try { alwaysChoose = !!game.settings.get(MODULE_ID, "tokenArtAlwaysChoose"); } catch (_) {}
     if (_imageIsInUserFolders(currentImg)) {
-        console.log(`${TAG} | "${actor.name}" already uses user-folder art (${currentImg}) — leaving alone.`);
-        return;
+        const exists = await _fileExists(currentImg);
+        if (exists && !alwaysChoose) {
+            console.log(`${TAG} | "${actor.name}" already uses user-folder art (${currentImg}) — leaving alone.`);
+            return;
+        }
+        console.log(exists
+            ? `${TAG} | "${actor.name}" has valid folder art but Always-Choose is ON — re-showing chooser.`
+            : `${TAG} | "${actor.name}" image path is DEAD (${currentImg}) — re-matching to self-heal.`);
     }
 
     // Wait for index to be ready (build it if not)
@@ -1287,18 +1445,47 @@ async function _onTokenCreated(tokenDoc, options, userId) {
         await _waitForBio(tokenDoc);
     }
 
-    // Build a role-aware search name: species + role.
-    // factionRole comes from the smart-setup or customize dialog.
-    let searchName = initialActorName;
+    // v0.7.21: TWO-PASS search — broad species match first, then RANK the
+    // role-narrowed matches at the top. Previously the search was just
+    // "Goblin Archer" (narrow), which found exactly 1 file and hid the
+    // GM's other 18 goblin variants. Per Johnny 2026-06-09 — "shouldn't
+    // it show me every one of them? I've got Goblin Archer, Goblin
+    // Warrior, Goblin Hexer, Goblin Boss, Goblin on a Dog..."
+    //
+    // Strategy:
+    //   1. Always search the broad species name (e.g. "Goblin") — gets
+    //      all variants in the index (via prefix expansion or family-folder
+    //      fallback)
+    //   2. If a role is set, ALSO search the narrowed name ("Goblin
+    //      Archer") — these become the "preferred" matches
+    //   3. Merge: preferred matches at the top, then all remaining broad
+    //      matches (de-duped). Chooser shows everything; GM picks.
+    let role = "";
     try {
-        const role = String(tokenDoc.actor?.getFlag?.("ace-engine", "factionRole") ?? "").trim();
-        if (role && !initialActorName.toLowerCase().includes(role.toLowerCase())) {
-            searchName = `${initialActorName} ${role}`.trim();
-            console.log(`${TAG} | Role-aware lookup: "${initialActorName}" + "${role}" → "${searchName}"`);
-        }
-    } catch (_) { /* role flag absent — proceed with name only */ }
+        role = String(tokenDoc.actor?.getFlag?.("ace-engine", "factionRole") ?? "").trim();
+    } catch (_) { /* role flag absent */ }
 
-    const { matches, reason } = _findMatches(searchName);
+    const broad = _findMatches(initialActorName);
+    let matches = broad.matches;
+    let reason  = broad.reason;
+    console.log(`${TAG} | [DIAG] Broad search "${initialActorName}" → ${broad.matches.length} matches (reason="${broad.reason}")`);
+
+    if (role && !initialActorName.toLowerCase().includes(role.toLowerCase())) {
+        const narrowedName = `${initialActorName} ${role}`.trim();
+        const narrowed = _findMatches(narrowedName);
+        console.log(`${TAG} | [DIAG] Narrowed search "${narrowedName}" → ${narrowed.matches.length} matches (reason="${narrowed.reason}")`);
+        if (narrowed.matches?.length) {
+            // Preferred (role-matching) first, then broad-only entries (de-duped by path)
+            const preferredPaths = new Set(narrowed.matches.map(m => m.path));
+            const broadOnly = broad.matches.filter(m => !preferredPaths.has(m.path));
+            matches = [...narrowed.matches, ...broadOnly];
+            reason  = `${narrowed.reason}+broad`;
+            console.log(`${TAG} | [DIAG] Merged: ${narrowed.matches.length} preferred + ${broadOnly.length} broad-only = ${matches.length} total`);
+        }
+    } else {
+        console.log(`${TAG} | [DIAG] No role set (or role already in actor name) — using broad search only`);
+    }
+    console.log(`${TAG} | [DIAG] Final matches before chooser: ${matches.length} (will display up to ${50} in chooser)`);
 
     console.log(`${TAG} | "${actor.name}" — current="${currentImg}", matches=${matches.length}, reason="${reason}"`);
     if (matches.length) {
@@ -1370,16 +1557,19 @@ function _notifyMissing(actorName, strippedName = null) {
  */
 let _activated = false;
 export function activateTokenArtEngine() {
-    if (_activated) return;
-    if (!game.user.isGM) return;
+    if (_activated) return Promise.resolve();
+    if (!game.user.isGM) return Promise.resolve();
     _activated = true;
 
     // Build the index in the background after world load so first-spawn
     // doesn't pay the scan cost. createToken will await readiness if needed.
-    rebuildTokenArtIndex().catch(err =>
+    // Returns the build promise so the ready hook can await it before running
+    // the load-time path-integrity audit (which needs a fresh index).
+    const buildPromise = rebuildTokenArtIndex().catch(err =>
         console.warn(`${TAG} | Initial index build failed:`, err)
     );
 
     Hooks.on("createToken", _onTokenCreated);
     console.log(`${TAG} | Auto Token Art active.`);
+    return buildPromise;
 }
