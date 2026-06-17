@@ -1312,11 +1312,12 @@ async function _shouldWaitForBio(tokenDoc) {
  * patiently waits. After 2s a toast appears so the GM knows the chooser
  * is paused on purpose.
  *
- * Three completion signals (any one wins):
+ * Completion signals (any one wins):
  *   1. `ace-engine.bioComplete` Hook fires for this token   ← primary
  *   2. `flags.ace-engine.bioGenerated` becomes true         ← fallback
- *   3. 10-minute hard cutoff so a wedged session doesn't    ← safety
- *      hang the chooser literally forever
+ *   3. the token is deleted (GM cancels)                    ← abort
+ * There is NO time cutoff — the chooser waits indefinitely (Johnny,
+ * 2026-06-09). The only way out is the bio finishing or deleting the token.
  */
 async function _waitForBio(tokenDoc) {
     // v0.7.21: NO HARD CUTOFF. Per Johnny 2026-06-09 — the GM takes as long
@@ -1432,8 +1433,9 @@ async function _onTokenCreated(tokenDoc, options, userId) {
     //      Skips the wait entirely otherwise — instant chooser, no
     //      lag for users who don't have the bio system enabled.
     //   2. _waitForBio: polls actor.bioGenerated flag every 500ms with
-    //      30s deadline. Posts a "waiting…" notification if the wait
-    //      exceeds 2s so the GM knows what's happening.
+    //      NO time cutoff — waits indefinitely (cancel by deleting the
+    //      token). Posts a "waiting…" notification after 2s so the GM
+    //      knows what's happening.
     //
     // After the wait, build the search string from the ORIGINAL creature
     // name (captured before the wait) plus the faction-assigned role flag
