@@ -1396,6 +1396,17 @@ async function _onTokenCreated(tokenDoc, options, userId) {
     const actor = tokenDoc.actor;
     if (!actor) return;
 
+    // ── Skip player characters / party members entirely ──────────────────
+    // PCs have their own portraits + bios; the auto-chooser and the bio-wait
+    // must NEVER run on the party. A scene full of PCs was triggering a
+    // "waiting for bio" popup per token AND re-matching their art to other
+    // same-named tokens (e.g. "King" → some other King). The GM can still
+    // re-pick a PC's art by hand from the token HUD. (2026-06-28)
+    if (actor.hasPlayerOwner || actor.type === "character") {
+        console.log(`${TAG} | "${actor.name}" is a player character — skipping auto token-art + bio-wait.`);
+        return;
+    }
+
     // Skip flag — actor explicitly opted out
     try {
         if (actor.getFlag(MODULE_ID, "skipAutoArt")) return;
@@ -1442,7 +1453,13 @@ async function _onTokenCreated(tokenDoc, options, userId) {
     // (e.g. "Goblin" + "Archer" = "Goblin Archer"). This way bio renaming
     // the token to "Gronk" doesn't break art matching — we still search
     // for art keyed on the species, with role-narrowing for the variant.
-    const initialActorName = String(tokenDoc.actor?.name ?? tokenDoc.name ?? "");
+    // Species tag first (ACE QOL stamps the true creature identity on every NPC
+    // token at drop — survives ANY later rename, flavor, or even a manual sheet
+    // rename), sheet name as the fallback for tokens without a stamp or when
+    // ACE QOL isn't active. (Johnny's type-not-name architecture call, 2026-07-26.)
+    let _speciesName = "";
+    try { _speciesName = String(game.aceQol?.speciesOf?.(tokenDoc)?.name ?? "").trim(); } catch (_) { /* qol absent */ }
+    const initialActorName = _speciesName || String(tokenDoc.actor?.name ?? tokenDoc.name ?? "");
     if (await _shouldWaitForBio(tokenDoc)) {
         await _waitForBio(tokenDoc);
     }
@@ -1558,6 +1575,58 @@ function _notifyMissing(actorName, strippedName = null) {
  * GM-only. Idempotent — safe to call more than once.
  */
 let _activated = false;
+/**
+ * Open the token-art chooser for an ACTOR on demand and apply the pick to its
+ * PROTOTYPE token, so every token dropped from that actor afterwards uses the
+ * chosen art. Wired to the Actors-sidebar right-click menu (Johnny 2026-07-27:
+ * "right-click the actor in the sidebar and the token art picker comes up").
+ *
+ * Reuses the exact same index + chooser the auto-on-drop path uses — no second
+ * implementation to drift. Portraits stay untouched; this is TOKEN art only.
+ *
+ * @param {Actor} actor
+ * @returns {Promise<string|null>} the chosen path, or null if cancelled/none
+ */
+export async function pickTokenArtForActor(actor) {
+    if (!actor) return null;
+    if (!game.user.isGM) { ui.notifications?.warn("Only the GM can change token art."); return null; }
+    try {
+        // The index builds in the background at world load; a right-click can
+        // easily beat it, so make sure it exists before searching.
+        if (!_index.ready) {
+            ui.notifications?.info("ACE Token Art: building the art index…");
+            await rebuildTokenArtIndex({ silent: true });
+        }
+
+        // Search on the SPECIES first (survives any rename), then the sheet
+        // name — same precedence the auto-matcher uses.
+        let searchName = "";
+        try { searchName = String(game.aceQol?.speciesOf?.(actor)?.name ?? "").trim(); } catch (_) { /* qol absent */ }
+        if (!searchName) searchName = String(actor.name ?? "").trim();
+
+        const { matches } = _findMatches(searchName);
+        if (!matches?.length) {
+            ui.notifications?.warn(`ACE Token Art: no art found for "${searchName}". Drop a file named "${searchName}.webp" into a configured folder.`);
+            return null;
+        }
+
+        // The chooser takes a tokenDoc for its preview; the actor's prototype
+        // token is exactly that shape and is what we're editing.
+        const chosen = await _showChooser(actor.prototypeToken, matches, { actorName: searchName });
+        if (!chosen) return null;   // GM cancelled
+
+        await actor.update({ "prototypeToken.texture.src": chosen.path }, { aceTokenArtRepair: true });
+        await _setRecentChoice(searchName, chosen.path);
+        ui.notifications?.info(`Token art set for ${actor.name}.`);
+        console.log(`${TAG} | Prototype token art set via sidebar for "${actor.name}" → ${chosen.path}`);
+        return chosen.path;
+    } catch (err) {
+        console.error(`${TAG} | pickTokenArtForActor failed:`, err);
+        ui.notifications?.error("ACE Token Art: couldn't open the picker — see console.");
+        return null;
+    }
+}
+
 export function activateTokenArtEngine() {
     if (_activated) return Promise.resolve();
     if (!game.user.isGM) return Promise.resolve();
@@ -1572,6 +1641,34 @@ export function activateTokenArtEngine() {
     );
 
     Hooks.on("createToken", _onTokenCreated);
+
+    // ── Actors-sidebar right-click → "Choose Token Art" ────────────────────
+    // Both hook names registered for V12/V13 compat (the suite's pattern).
+    const _actorArtContext = (_html, options) => {
+        try {
+            if (!Array.isArray(options)) return;
+            if (options.some(o => o.__aceTokenArt)) return;   // never double-add
+            options.push({
+                name: "Choose Token Art",
+                icon: '<i class="fas fa-images"></i>',
+                __aceTokenArt: true,
+                condition: () => game.user.isGM,
+                callback: (li) => {
+                    // V13 passes an element; V12 a jQuery wrapper.
+                    const el = li instanceof HTMLElement ? li : li?.[0];
+                    const id = el?.dataset?.entryId ?? el?.dataset?.documentId;
+                    const actor = game.actors.get(id);
+                    if (!actor) return ui.notifications?.warn("Couldn't resolve that actor.");
+                    pickTokenArtForActor(actor);
+                },
+            });
+        } catch (err) {
+            console.warn(`${TAG} | actor context menu injection failed (non-fatal):`, err);
+        }
+    };
+    Hooks.on("getActorDirectoryEntryContext", _actorArtContext);  // V12
+    Hooks.on("getActorContextOptions",        _actorArtContext);  // V13
+
     console.log(`${TAG} | Auto Token Art active.`);
     return buildPromise;
 }

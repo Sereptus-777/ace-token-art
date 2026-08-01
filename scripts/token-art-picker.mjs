@@ -1,0 +1,374 @@
+// ═══════════════════════════════════════════════════════════════════════════
+//  ACE: Token Art — Manual Picker
+// ───────────────────────────────────────────────────────────────────────────
+//  A GM clicks a token, opens a big-portrait grid of EVERY art option from the
+//  configured folders, and one click applies it. No waiting on the bio/auto
+//  system. The pick persists on the token (texture.src lives on the token doc,
+//  so it sticks even for unlinked tokens), and the actor is flagged skipAutoArt
+//  so the slow auto-bio art flow won't override the manual choice on future drops.
+//
+//  Self-contained: talks to the ace-token-art PUBLIC API at runtime, registers
+//  its own hooks, touches none of the engine internals. Entry points (any of):
+//    • Token HUD button (select a token → the picture button on its HUD)
+//    • Scene-control "Pick Token Art" tool (token tools, left toolbar)
+//    • API: game.modules.get("ace-token-art").api.openPickerForControlled()
+//    • Global: AceTokenArtPicker.openForControlled()   (macro-friendly)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MID = "ace-token-art";
+const PICKER_BUILD = "1.0.11";   // shown in the header — if you don't see this number, the new file isn't loading
+
+function _api() { return game.modules.get(MID)?.api ?? null; }
+
+/** Art entries matching a name — searchTokenArt() first, raw index as fallback. */
+function _queryArt(name) {
+  const api = _api();
+  const q = String(name ?? "").trim();
+  let entries = [];
+  try { const r = api?.searchTokenArt?.(q); if (Array.isArray(r)) entries = r; } catch (_) {}
+  if (!entries.length) {
+    try {
+      const idx = api?.getTokenArtIndex?.();
+      const all = idx?.all ?? [];
+      const ql = q.toLowerCase().trim();
+      if (!ql) {
+        entries = all;
+      } else {
+        // Progressive fuzzy match — an exact/substring miss should still surface
+        // the closest art instead of "no results". Tiers, best-first:
+        //   100 full phrase · 60 all words (any order) · 40 first word · 20 any word.
+        // (Johnny 2026-07-13: "Goblin Crookshank" with no exact hit should show
+        //  every goblin — fall back to the first word.)
+        const hay   = e => String(e.fullLower ?? e.fullName ?? e.path ?? "").toLowerCase();
+        const words = ql.split(/\s+/).filter(Boolean);
+        const first = words[0] ?? ql;
+        const scored = [];
+        for (const e of all) {
+          const h = hay(e);
+          let score = 0;
+          if (h.includes(ql)) score = 100;
+          else if (words.length > 1 && words.every(w => h.includes(w))) score = 60;
+          else if (h.includes(first)) score = 40;
+          else if (words.some(w => h.includes(w))) score = 20;
+          if (score) scored.push({ e, score });
+        }
+        scored.sort((a, b) => b.score - a.score);
+        entries = scored.map(s => s.e);
+      }
+    } catch (_) {}
+  }
+  return entries;
+}
+
+export class TokenArtPicker {
+
+  static _el = null;
+
+  static register() {
+    // ── Token HUD button (primary entry: click a token → its picture button) ──
+    Hooks.on("renderTokenHUD", (hud, html) => {
+      try {
+        if (!game.user?.isGM) return;
+        const root = (html instanceof HTMLElement) ? html : (html?.[0] ?? null);
+        if (!root) return;
+        const col = root.querySelector(".col.left") ?? root.querySelector(".col.right") ?? root;
+        if (!col || col.querySelector(".ace-tap-hud-btn")) return;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "control-icon ace-tap-hud-btn";
+        btn.title = "ACE — Pick Token Art";
+        btn.innerHTML = `<i class="fas fa-images"></i>`;
+        btn.addEventListener("click", (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          TokenArtPicker.open(hud.object?.document ?? hud.object);
+        });
+        col.appendChild(btn);
+      } catch (err) { console.warn(`${MID} | picker HUD button failed:`, err); }
+    });
+
+    // ── Scene-control tool (best-effort; handles V12 array + V13 object shapes) ──
+    Hooks.on("getSceneControlButtons", (controls) => {
+      try {
+        if (!game.user?.isGM) return;
+        const grp = Array.isArray(controls)
+          ? controls.find(c => c?.name === "token" || c?.name === "tokens")
+          : (controls?.tokens ?? controls?.token);
+        if (!grp) return;
+        const tool = {
+          name: "ace-token-art-picker",
+          title: "Pick Token Art",
+          icon: "fas fa-images",
+          button: true,
+          visible: true,
+          onClick: () => TokenArtPicker.openForControlled(),
+          onChange: () => TokenArtPicker.openForControlled(),
+        };
+        if (Array.isArray(grp.tools)) {
+          if (!grp.tools.some(t => t?.name === tool.name)) grp.tools.push(tool);
+        } else if (grp.tools && typeof grp.tools === "object") {
+          grp.tools[tool.name] = tool;
+        }
+      } catch (err) { console.warn(`${MID} | picker scene control failed:`, err); }
+    });
+
+    // ── Public API + global (macro-friendly, survives even if buttons don't render) ──
+    try {
+      const mod = game.modules.get(MID);
+      if (mod) {
+        mod.api = mod.api ?? {};
+        mod.api.openPicker = (t) => TokenArtPicker.open(t);
+        mod.api.openPickerForControlled = () => TokenArtPicker.openForControlled();
+      }
+    } catch (_) {}
+    try { globalThis.AceTokenArtPicker = TokenArtPicker; } catch (_) {}
+
+    console.log(`${MID} | Manual Token Art Picker ready — HUD button + scene control + AceTokenArtPicker.openForControlled().`);
+  }
+
+  static openForControlled() {
+    const tk = canvas.tokens?.controlled?.[0];
+    if (!tk) { ui.notifications?.warn("Select a token first, then open the Token Art picker."); return; }
+    TokenArtPicker.open(tk.document ?? tk);
+  }
+
+  static open(tokenLike) {
+    try {
+      if (!game.user?.isGM) { ui.notifications?.warn("Token Art picker is GM-only."); return; }
+      const tokenDoc = tokenLike?.document ?? tokenLike;
+      if (!tokenDoc?.update) { ui.notifications?.warn("No token to pick art for."); return; }
+      TokenArtPicker.close();
+      const baseName = tokenDoc.actor?.name ?? tokenDoc.name ?? "";
+      TokenArtPicker._render(tokenDoc, baseName);
+    } catch (err) { console.error(`${MID} | picker open failed:`, err); }
+  }
+
+  static close() {
+    try { TokenArtPicker._el?.remove(); } catch (_) {}
+    TokenArtPicker._el = null;
+    try { document.removeEventListener("keydown", TokenArtPicker._onKey, true); } catch (_) {}
+  }
+
+  static _onKey(ev) {
+    if (ev.key === "Escape") { ev.preventDefault(); TokenArtPicker.close(); }
+  }
+
+  static _render(tokenDoc, query) {
+    // ── Backdrop ──
+    const backdrop = document.createElement("div");
+    Object.assign(backdrop.style, {
+      position: "fixed", inset: "0", zIndex: "100000",
+      background: "rgba(0,0,0,0.55)", display: "flex",
+      alignItems: "center", justifyContent: "center",
+    });
+    backdrop.addEventListener("mousedown", (ev) => { if (ev.target === backdrop) TokenArtPicker.close(); });
+
+    // ── Panel ──
+    const panel = document.createElement("div");
+    Object.assign(panel.style, {
+      width: "min(94vw, 1200px)", height: "min(88vh, 880px)",
+      display: "flex", flexDirection: "column",
+      background: "linear-gradient(180deg,#15110d 0%,#0c0a08 100%)",
+      border: "2px solid #d4af37", borderRadius: "10px",
+      boxShadow: "0 12px 44px rgba(0,0,0,0.72)", color: "#f0e4c0",
+      fontFamily: "'Signika','Helvetica Neue',sans-serif", overflow: "hidden",
+    });
+    panel.addEventListener("mousedown", (ev) => ev.stopPropagation());
+
+    // ── Header ──
+    const header = document.createElement("div");
+    Object.assign(header.style, {
+      display: "flex", alignItems: "center", gap: "12px",
+      padding: "14px 16px", borderBottom: "1px solid #4a3a28",
+      background: "linear-gradient(180deg,#1d1710,#15110d)",
+    });
+    header.innerHTML = `<i class="fas fa-images" style="color:#d4af37;font-size:20px;"></i>
+      <div style="font-size:18px;font-weight:700;color:#d4af37;letter-spacing:.5px;">TOKEN ART <span style="font-size:11px;color:#7a6a48;font-weight:500;">v${PICKER_BUILD}</span></div>`;
+    const nameEl = document.createElement("div");
+    Object.assign(nameEl.style, { fontSize: "15px", color: "#c9b48a" });
+    nameEl.textContent = tokenDoc.name ?? "";
+    header.appendChild(nameEl);
+
+    const search = document.createElement("input");
+    search.type = "text"; search.value = query ?? ""; search.placeholder = "Search art by name…";
+    Object.assign(search.style, {
+      marginLeft: "auto", width: "260px", fontSize: "15px", padding: "7px 10px",
+      borderRadius: "6px", border: "1px solid #6b5530", background: "#0c0a08", color: "#f0e4c0",
+    });
+    header.appendChild(search);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button"; closeBtn.innerHTML = `<i class="fas fa-times"></i>`;
+    Object.assign(closeBtn.style, {
+      fontSize: "17px", background: "transparent", border: "none", color: "#c9b48a", cursor: "pointer", padding: "4px 8px",
+    });
+    closeBtn.addEventListener("click", () => TokenArtPicker.close());
+    header.appendChild(closeBtn);
+
+    // ── Grid (big thumbnails) ──
+    const grid = document.createElement("div");
+    Object.assign(grid.style, {
+      flex: "1", overflowY: "auto", padding: "16px", display: "grid", gap: "14px",
+      gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", alignContent: "start",
+    });
+
+    // ── Footer (result count + pager) ──
+    const footer = document.createElement("div");
+    Object.assign(footer.style, {
+      padding: "8px 16px", borderTop: "1px solid #4a3a28", fontSize: "13px", color: "#9c8a64",
+      display: "flex", alignItems: "center", gap: "12px",
+    });
+
+    // ── Paging state — big thumbnails, paged so hundreds of results never squish ──
+    const PER_PAGE = 60;
+    let _list = [];
+    let _page = 0;
+
+    // Set styles with !important so NO external module CSS (BG3 HUD, portrait tweaks,
+    // Foundry core img rules, etc.) can override our cell dimensions or force
+    // object-fit:cover — that was flattening the cells + cropping the art to a band.
+    const _imp = (el, props) => {
+      for (const [k, v] of Object.entries(props)) {
+        const prop = k.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
+        try { el.style.setProperty(prop, v, "important"); } catch (_) { el.style[k] = v; }
+      }
+    };
+
+    const _card = (entry) => {
+      const card = document.createElement("div");
+      Object.assign(card.style, {
+        cursor: "pointer", borderRadius: "8px", overflow: "hidden",
+        border: "2px solid transparent", background: "#0c0a08",
+        transition: "border-color .12s, transform .12s",
+      });
+      _imp(card, { display: "flex", flexDirection: "column", height: "280px" });
+      const imgWrap = document.createElement("div");
+      Object.assign(imgWrap.style, { background: "#000", display: "flex", alignItems: "center", justifyContent: "center" });
+      _imp(imgWrap, { flex: "1 1 auto", minHeight: "0", width: "100%" });
+      const img = document.createElement("img");
+      img.src = entry.path; img.loading = "lazy";
+      img.addEventListener("error", () => { img.style.opacity = "0.2"; });
+      _imp(img, { width: "100%", height: "100%", objectFit: "contain", maxWidth: "none", maxHeight: "none", border: "none", borderRadius: "0" });
+      imgWrap.appendChild(img);
+      const lbl = document.createElement("div");
+      Object.assign(lbl.style, { padding: "6px 8px", fontSize: "13px", color: "#e9dcb0", textAlign: "center", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" });
+      _imp(lbl, { flex: "0 0 auto" });
+      // FULL art name (e.g. "Goblin Minion 01") — not the parsed variant, which drops the
+      // base and reads as a confusing "Minion 01". title = same, so hover shows the full name.
+      lbl.textContent = entry.fullName || entry.displayVariant || entry.displayBase || "art";
+      lbl.title = lbl.textContent;
+      card.appendChild(imgWrap); card.appendChild(lbl);
+      card.addEventListener("mouseenter", () => { card.style.borderColor = "#d4af37"; card.style.transform = "translateY(-2px)"; });
+      card.addEventListener("mouseleave", () => { card.style.borderColor = "transparent"; card.style.transform = "none"; });
+      card.addEventListener("click", () => TokenArtPicker._apply(tokenDoc, entry));
+      return card;
+    };
+
+    const _navBtn = (label, disabled, onClick) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = label;
+      Object.assign(b.style, {
+        fontSize: "13px", padding: "5px 12px", borderRadius: "6px", border: "1px solid #6b5530",
+        background: disabled ? "#0c0a08" : "#1d1710", color: disabled ? "#5c503a" : "#e9dcb0",
+        cursor: disabled ? "default" : "pointer",
+      });
+      b.disabled = disabled;
+      if (!disabled) b.addEventListener("click", onClick);
+      return b;
+    };
+
+    const renderPage = () => {
+      grid.innerHTML = "";
+      footer.innerHTML = "";
+      if (!_list.length) {
+        const empty = document.createElement("div");
+        Object.assign(empty.style, { gridColumn: "1/-1", textAlign: "center", color: "#9c8a64", padding: "44px", fontSize: "16px" });
+        empty.textContent = "No art found. Check your Token Art folders in settings, or rescan.";
+        grid.appendChild(empty);
+        footer.textContent = "0 results";
+        return;
+      }
+      const pages = Math.max(1, Math.ceil(_list.length / PER_PAGE));
+      _page = Math.min(Math.max(0, _page), pages - 1);
+      const start = _page * PER_PAGE;
+      for (const entry of _list.slice(start, start + PER_PAGE)) grid.appendChild(_card(entry));
+      try { grid.scrollTop = 0; } catch (_) {}
+
+      // Footer: result range on the left, pager on the right.
+      const count = document.createElement("div");
+      count.style.color = "#9c8a64";
+      count.textContent = `${_list.length} result${_list.length === 1 ? "" : "s"} — showing ${start + 1}–${Math.min(_list.length, start + PER_PAGE)}. Click to apply (sticks on this token, even unlinked).`;
+      footer.appendChild(count);
+      const nav = document.createElement("div");
+      Object.assign(nav.style, { marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px", flex: "0 0 auto" });
+      nav.appendChild(_navBtn("‹ Prev", _page <= 0, () => { _page--; renderPage(); }));
+      const ind = document.createElement("div");
+      Object.assign(ind.style, { fontSize: "13px", color: "#c9b48a", minWidth: "92px", textAlign: "center" });
+      ind.textContent = `Page ${_page + 1} / ${pages}`;
+      nav.appendChild(ind);
+      nav.appendChild(_navBtn("Next ›", _page >= pages - 1, () => { _page++; renderPage(); }));
+      footer.appendChild(nav);
+    };
+
+    const paint = (list) => {
+      _list = Array.isArray(list) ? list : [];
+      _page = 0;
+      renderPage();
+    };
+
+    let timer = null;
+    search.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => paint(_queryArt(search.value)), 180);
+    });
+
+    // ── Draggable by the header (grab + move like a normal window) ──
+    // On first grab we switch the panel from flex-centered to position:fixed at its
+    // current spot (no jump), then follow the mouse. Move/up live on the full-screen
+    // backdrop, so they're torn down automatically when close() removes it.
+    header.style.cursor = "move";
+    let _drag = null;
+    header.addEventListener("mousedown", (ev) => {
+      if (ev.target.closest("input, button")) return;   // let the search box + close button work
+      const rect = panel.getBoundingClientRect();
+      Object.assign(panel.style, { position: "fixed", margin: "0", left: `${rect.left}px`, top: `${rect.top}px` });
+      _drag = { dx: ev.clientX - rect.left, dy: ev.clientY - rect.top, w: rect.width, h: rect.height };
+      ev.preventDefault();
+    });
+    backdrop.addEventListener("mousemove", (ev) => {
+      if (!_drag) return;
+      const x = Math.max(80 - _drag.w, Math.min(ev.clientX - _drag.dx, window.innerWidth - 80));
+      const y = Math.max(0, Math.min(ev.clientY - _drag.dy, window.innerHeight - 40));
+      panel.style.left = `${x}px`; panel.style.top = `${y}px`;
+    });
+    backdrop.addEventListener("mouseup", () => { _drag = null; });
+
+    panel.appendChild(header);
+    panel.appendChild(grid);
+    panel.appendChild(footer);
+    backdrop.appendChild(panel);
+    document.body.appendChild(backdrop);
+    TokenArtPicker._el = backdrop;
+    try { document.addEventListener("keydown", TokenArtPicker._onKey, true); } catch (_) {}
+    try { search.focus(); } catch (_) {}
+
+    paint(_queryArt(query));
+  }
+
+  static async _apply(tokenDoc, entry) {
+    try {
+      await tokenDoc.update({ "texture.src": entry.path });
+      // Keep the slow auto-bio art flow from overwriting this manual pick later.
+      try { await tokenDoc.actor?.setFlag(MID, "skipAutoArt", true); } catch (_) {}
+      ui.notifications?.info(`Token art set: ${entry.fullName || entry.displayVariant || "art"}`);
+      TokenArtPicker.close();
+    } catch (err) {
+      console.error(`${MID} | picker apply failed:`, err);
+      ui.notifications?.error("Failed to apply token art (see console).");
+    }
+  }
+}
+
+Hooks.once("ready", () => {
+  try { TokenArtPicker.register(); }
+  catch (err) { console.error(`${MID} | Token Art Picker register failed:`, err); }
+});
