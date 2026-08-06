@@ -89,6 +89,47 @@ const ACETokenArtFolders = {
         }
     },
 
+    /**
+     * TEXT -> ARRAY for every kind, WITHOUT rescanning. The array is a derived
+     * cache, never an independent source of truth.
+     *
+     * ⚠️ WHY THIS EXISTS (2026-08-06). The array was only ever rewritten by the
+     * text setting's onChange hook, which fires just when the value CHANGES.
+     * Any path that didn't produce a change event — a value written before this
+     * wiring existed, a settings save that round-tripped identical text, an
+     * array edited directly — left `tokenArtFolders` frozen at its default
+     * ["NPCs", "assets/srd5e/img/bestiary/tokens/MM"]. That is EXACTLY the two
+     * folders Johnny kept seeing scanned no matter what he listed, and the
+     * portrait array sat at its own default of [] so portraits scanned nothing.
+     *
+     * Every scan now reconciles first, so the engine can only ever scan what
+     * the settings panel actually lists.
+     *
+     * @returns {Promise<{changed: string[]}>} labels of the kinds that moved
+     */
+    async reconcileFromText() {
+        const changed = [];
+        for (const [kind, k] of Object.entries(this._kinds)) {
+            try {
+                const raw = game.settings.get(MODULE_ID, k.text);
+                const folders = String(raw ?? "")
+                    .split("\n").map(v => _normalizeFolderPath(v)).filter(Boolean);
+                const current = game.settings.get(MODULE_ID, k.store);
+                // Empty text means "nothing listed" — but only trust that once
+                // the text has actually been seeded, or a fresh install would
+                // wipe its own sensible defaults on first boot.
+                if (!folders.length && !String(raw ?? "").trim()) continue;
+                if (JSON.stringify(current) === JSON.stringify(folders)) continue;
+                await game.settings.set(MODULE_ID, k.store, folders);
+                changed.push(k.label);
+                console.log(`${MODULE_ID} | ${k.label} folders reconciled from settings: ${folders.length} folder(s) — ${folders.join(", ") || "(none)"}`);
+            } catch (err) {
+                console.warn(`${MODULE_ID} | ${k.label} folder reconcile failed:`, err);
+            }
+        }
+        return { changed };
+    },
+
     /** The text box -> array, then rescan so the change takes effect at once. */
     async applyFromText(raw, kind = "token") {
         const k = this._kinds[kind];
@@ -343,12 +384,42 @@ function _registerSettings() {
                 }
                 async _render() {
                     // No form — just do the work and get out of the way.
+                    //
+                    // "Rescan Folders Now" means EVERY folder listed in these
+                    // settings, both lists. It used to call rescanTokenArt only,
+                    // so the portrait folders were never re-read — and it scanned
+                    // the stale `tokenArtFolders` array rather than what the panel
+                    // actually lists. Reconcile first, then scan both, then say
+                    // out loud what was scanned. (2026-08-06)
                     try {
+                        await ACETokenArtFolders.reconcileFromText();
                         const api = game.modules.get(MODULE_ID)?.api;
-                        const res = await api?.rescanTokenArt?.({ useCache: false });
-                        ui.notifications?.info(
-                            `ACE: Token Art — rescan complete: ${(res?.fileCount ?? 0).toLocaleString()} files, ${(res?.baseCount ?? 0).toLocaleString()} creatures.`
-                        );
+
+                        const tFolders = game.settings.get(MODULE_ID, "tokenArtFolders") ?? [];
+                        const pFolders = game.settings.get(MODULE_ID, "tokenArtPortraitFolders") ?? [];
+
+                        const tokenRes    = await api?.rescanTokenArt?.({ useCache: false, silent: true });
+                        const portraitRes = await api?.rescanPortraitArt?.({ silent: true });
+
+                        const parts = [
+                            `Token art: ${(tokenRes?.fileCount ?? 0).toLocaleString()} files / ${(tokenRes?.baseCount ?? 0).toLocaleString()} creatures across ${tFolders.length} folder${tFolders.length === 1 ? "" : "s"}`,
+                            `Portraits: ${(portraitRes?.fileCount ?? 0).toLocaleString()} files across ${pFolders.length} folder${pFolders.length === 1 ? "" : "s"}`,
+                        ];
+                        ui.notifications?.info(`ACE: Token Art — rescan complete. ${parts.join(" · ")}`, { permanent: true });
+                        console.log(`${MODULE_ID} | Rescan complete.\n  Token folders   : ${tFolders.join(", ") || "(none)"}\n  Portrait folders: ${pFolders.join(", ") || "(none)"}`);
+
+                        // A listed folder that yielded nothing is almost always a
+                        // typo or a path that doesn't exist. Say so — silence here
+                        // is what let "it only scans two folders" go unnoticed.
+                        if (tFolders.length && !(tokenRes?.fileCount)) {
+                            ui.notifications?.warn(`ACE: Token Art — ${tFolders.length} token folder(s) listed but NO files found. Check the paths: ${tFolders.join(", ")}`, { permanent: true });
+                        }
+                        if (pFolders.length && !(portraitRes?.fileCount)) {
+                            ui.notifications?.warn(`ACE: Token Art — ${pFolders.length} portrait folder(s) listed but NO files found. Check the paths: ${pFolders.join(", ")}`, { permanent: true });
+                        }
+                        if (!pFolders.length) {
+                            ui.notifications?.warn("ACE: Token Art — no PORTRAIT folders are listed, so the Portrait tab will be empty. Add one in the settings panel.", { permanent: true });
+                        }
                     } catch (err) {
                         console.error(`${MODULE_ID} | Manual rescan failed:`, err);
                         ui.notifications?.error("ACE: Token Art — rescan failed; see the console.");
@@ -523,6 +594,14 @@ Hooks.once("ready", async () => {
     try { await ACETokenArtFolders.syncTextFromArray(); }
     catch (err) { console.warn(`${MODULE_ID} | Folder text sync failed (non-fatal):`, err); }
 
+    // …then push the text BACK through to the arrays the engine scans, before
+    // the first index build. Seeding alone only fills an empty box; without
+    // this second half, a folder list edited at any point when the onChange
+    // hook didn't fire stays invisible to every scan, forever. Order matters:
+    // seed first (so a fresh install keeps its defaults), reconcile second.
+    try { await ACETokenArtFolders.reconcileFromText(); }
+    catch (err) { console.warn(`${MODULE_ID} | Folder reconcile failed (non-fatal):`, err); }
+
     // Activate the engine (await the initial index build so the audit below
     // runs against a ready index).
     try { await activateTokenArtEngine(); }
@@ -552,6 +631,10 @@ Hooks.once("ready", async () => {
             rescanTokenArt: async (opts = {}) => {
                 const useCache = opts.useCache ?? false;
                 const silent = opts.silent ?? false;
+                // Scan what the SETTINGS list, never a stale array. Reconciling
+                // here means the console, the button and the startup path can
+                // all only ever scan the folders actually configured.
+                try { await ACETokenArtFolders.reconcileFromText(); } catch (_) {}
                 const result = await rebuildTokenArtIndex({ useCache, silent });
                 if (!silent && !result.fromCache) {
                     ui.notifications?.info(`${MODULE_ID}: Rescanned — ${result.fileCount} files, ${result.baseCount} base names.`);
@@ -583,8 +666,11 @@ Hooks.once("ready", async () => {
 
             // ── Portraits (separate folders, separate index) ──
             getPortraitIndex,
-            /** Rebuild the portrait index from tokenArtPortraitFolders. */
-            rescanPortraitArt: async (opts = {}) => rebuildPortraitIndex(opts),
+            /** Rebuild the portrait index from the configured portrait folders. */
+            rescanPortraitArt: async (opts = {}) => {
+                try { await ACETokenArtFolders.reconcileFromText(); } catch (_) {}
+                return rebuildPortraitIndex(opts);
+            },
             /** Filename search over portraits; empty query returns them all. */
             searchPortraitArt: (query) => {
                 const idx = getPortraitIndex();
