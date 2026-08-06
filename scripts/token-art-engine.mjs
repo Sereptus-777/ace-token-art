@@ -46,6 +46,72 @@ const _index = {
     ready: false,
 };
 
+// ─── Portrait index (separate folders, separate purpose) ─────────────────────
+// Johnny, 2026-08-06: portraits live in their own tree (e.g. NPC portraits) and
+// must NEVER be mixed into token art — a portrait on a token looks wrong and a
+// top-down token as a portrait looks worse.
+//
+// Deliberately much simpler than the token index above: no creature-folder vs
+// category-bin heuristics, no variant grouping. A portrait is one image of one
+// character, searched by filename. Keeping it dumb keeps it predictable.
+const _portraits = {
+    /** All entries, in scan order: {path, fullName, fullLower, file} */
+    all: [],
+    ready: false,
+};
+
+export function getPortraitIndex() { return _portraits; }
+
+/**
+ * (Re)build the portrait index from `tokenArtPortraitFolders`.
+ * No cache — portrait folders are small compared to token-art trees, and a
+ * stale portrait list is more annoying than a one-second scan.
+ */
+export async function rebuildPortraitIndex({ silent = false } = {}) {
+    const folders = (() => {
+        try {
+            const raw = game.settings.get(MODULE_ID, "tokenArtPortraitFolders");
+            return Array.isArray(raw) ? raw.filter(Boolean) : [];
+        } catch (_) { return []; }
+    })();
+
+    _portraits.all = [];
+    _portraits.ready = false;
+
+    if (!folders.length) {
+        _portraits.ready = true;
+        console.log(`${TAG} | No portrait folders configured — portrait index empty.`);
+        return { fileCount: 0, folders: 0 };
+    }
+
+    const t0 = performance.now();
+    const paths = [];
+    for (const folder of folders) {
+        try { for (const f of await _scanFolder(folder)) paths.push(f); }
+        catch (err) { console.warn(`${TAG} | Portrait scan failed for "${folder}":`, err?.message ?? err); }
+    }
+
+    const seen = new Set();
+    for (const p of paths) {
+        if (seen.has(p)) continue;
+        seen.add(p);
+        const file = decodeURIComponent(String(p).split("/").pop() ?? "");
+        const bare = file.replace(/\.[^.]+$/, "");
+        const full = _normalizeFilename(bare) || bare;
+        _portraits.all.push({ path: p, file, fullName: full, fullLower: full.toLowerCase() });
+    }
+    _portraits.all.sort((a, b) => a.fullLower.localeCompare(b.fullLower));
+    _portraits.ready = true;
+
+    const ms = Math.round(performance.now() - t0);
+    console.log(`${TAG} | Portrait index: ${_portraits.all.length} image(s) across ${folders.length} folder(s) in ${ms}ms.`);
+    if (!silent) {
+        try { ui.notifications?.info(`ACE: Token Art — ${_portraits.all.length.toLocaleString()} portraits indexed.`); }
+        catch (_) { /* non-fatal */ }
+    }
+    return { fileCount: _portraits.all.length, folders: folders.length };
+}
+
 // Active chooser DOM element — tracked so we can dismiss the previous one
 // before a new spawn pops a new chooser on top of it.
 let _activeChooser = null;
@@ -1636,9 +1702,31 @@ export function activateTokenArtEngine() {
     // doesn't pay the scan cost. createToken will await readiness if needed.
     // Returns the build promise so the ready hook can await it before running
     // the load-time path-integrity audit (which needs a fresh index).
-    const buildPromise = rebuildTokenArtIndex().catch(err =>
-        console.warn(`${TAG} | Initial index build failed:`, err)
-    );
+    //
+    // ⚠️ THE STARTUP RESCAN (Johnny, 2026-08-06). This used to call
+    // rebuildTokenArtIndex() bare, which defaults to useCache:true — so every
+    // world load hydrated the saved index and skipped the disk scan entirely.
+    // Art added between sessions never appeared until someone opened the
+    // folder dialog and hit Rescan by hand. Johnny reasonably assumed a
+    // startup rescan already existed; it never did. Now it's a real setting,
+    // default ON.
+    let _rescanOnStartup = true;
+    try { _rescanOnStartup = !!game.settings.get(MODULE_ID, "tokenArtRescanOnStartup"); }
+    catch (_) { /* setting not registered yet — fall back to rescanning */ }
+
+    console.log(`${TAG} | Startup index build — ${_rescanOnStartup ? "FULL RESCAN (reading folders from disk)" : "using saved cache (rescan on startup is OFF)"}`);
+
+    const buildPromise = rebuildTokenArtIndex({ useCache: !_rescanOnStartup, silent: true })
+        .then(res => {
+            console.log(`${TAG} | Startup index ready — ${res?.fileCount ?? 0} files, ${res?.baseCount ?? 0} creatures${res?.fromCache ? " (from cache)" : " (fresh scan)"}.`);
+            return res;
+        })
+        .catch(err => console.warn(`${TAG} | Initial index build failed:`, err));
+
+    // Portraits build alongside, never blocking the token index — the picker
+    // only needs them when its Portrait tab is opened.
+    rebuildPortraitIndex({ silent: true })
+        .catch(err => console.warn(`${TAG} | Initial portrait index build failed:`, err));
 
     Hooks.on("createToken", _onTokenCreated);
 

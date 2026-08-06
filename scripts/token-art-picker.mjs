@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MID = "ace-token-art";
-const PICKER_BUILD = "1.0.11";   // shown in the header — if you don't see this number, the new file isn't loading
+const PICKER_BUILD = "1.0.12";   // shown in the header — if you don't see this number, the new file isn't loading
 
 function _api() { return game.modules.get(MID)?.api ?? null; }
 
@@ -58,6 +58,20 @@ function _queryArt(name) {
     } catch (_) {}
   }
   return entries;
+}
+
+/**
+ * Portrait lookup — a SEPARATE index over the portrait folders.
+ * Deliberately never falls back to token art: a top-down token makes a
+ * terrible portrait, and silently offering one would be worse than an
+ * empty tab that tells you to set the folder.
+ */
+function _queryPortraits(name) {
+  const api = _api();
+  try {
+    const r = api?.searchPortraitArt?.(String(name ?? "").trim());
+    return Array.isArray(r) ? r : [];
+  } catch (_) { return []; }
 }
 
 export class TokenArtPicker {
@@ -153,6 +167,11 @@ export class TokenArtPicker {
   }
 
   static _render(tokenDoc, query) {
+    // Which tab is live. Declared FIRST so every handler below closes over an
+    // already-initialised binding — no temporal-dead-zone surprises.
+    let _mode = "token";              // "token" (texture.src) | "portrait" (actor.img)
+    const _run = (q) => (_mode === "portrait" ? _queryPortraits(q) : _queryArt(q));
+
     // ── Backdrop ──
     const backdrop = document.createElement("div");
     Object.assign(backdrop.style, {
@@ -187,6 +206,40 @@ export class TokenArtPicker {
     Object.assign(nameEl.style, { fontSize: "15px", color: "#c9b48a" });
     nameEl.textContent = tokenDoc.name ?? "";
     header.appendChild(nameEl);
+
+    // ── Tabs: Token Art | Portrait ──
+    const tabs = document.createElement("div");
+    Object.assign(tabs.style, { display: "flex", gap: "6px", marginLeft: "18px" });
+    const mkTab = (id, label, icon) => {
+      const t = document.createElement("button");
+      t.type = "button"; t.dataset.mode = id;
+      t.innerHTML = `<i class="fas ${icon}"></i> ${label}`;
+      Object.assign(t.style, {
+        fontSize: "14px", padding: "7px 14px", borderRadius: "6px", cursor: "pointer",
+        border: "1px solid #6b5530", background: "#0c0a08", color: "#c9b48a",
+        display: "flex", alignItems: "center", gap: "7px", fontWeight: "600",
+      });
+      t.addEventListener("click", () => {
+        if (_mode === id) return;
+        _mode = id; _page = 0;
+        syncTabs();
+        search.placeholder = id === "portrait" ? "Search portraits by name…" : "Search art by name…";
+        paint(_run(search.value));
+      });
+      tabs.appendChild(t);
+      return t;
+    };
+    const tabToken    = mkTab("token", "Token Art", "fa-chess-pawn");
+    const tabPortrait = mkTab("portrait", "Portrait", "fa-user");
+    const syncTabs = () => {
+      for (const t of [tabToken, tabPortrait]) {
+        const on = t.dataset.mode === _mode;
+        t.style.background  = on ? "#d4af37" : "#0c0a08";
+        t.style.color       = on ? "#15110d" : "#c9b48a";
+        t.style.borderColor = on ? "#f0d98a" : "#6b5530";
+      }
+    };
+    header.appendChild(tabs);
 
     const search = document.createElement("input");
     search.type = "text"; search.value = query ?? ""; search.placeholder = "Search art by name…";
@@ -259,7 +312,9 @@ export class TokenArtPicker {
       card.appendChild(imgWrap); card.appendChild(lbl);
       card.addEventListener("mouseenter", () => { card.style.borderColor = "#d4af37"; card.style.transform = "translateY(-2px)"; });
       card.addEventListener("mouseleave", () => { card.style.borderColor = "transparent"; card.style.transform = "none"; });
-      card.addEventListener("click", () => TokenArtPicker._apply(tokenDoc, entry));
+      card.addEventListener("click", () => (_mode === "portrait"
+        ? TokenArtPicker._applyPortrait(tokenDoc, entry)
+        : TokenArtPicker._apply(tokenDoc, entry)));
       return card;
     };
 
@@ -282,7 +337,9 @@ export class TokenArtPicker {
       if (!_list.length) {
         const empty = document.createElement("div");
         Object.assign(empty.style, { gridColumn: "1/-1", textAlign: "center", color: "#9c8a64", padding: "44px", fontSize: "16px" });
-        empty.textContent = "No art found. Check your Token Art folders in settings, or rescan.";
+        empty.textContent = _mode === "portrait"
+          ? "No portraits found. Set 'Portrait Art Folders' in the module settings, then rescan."
+          : "No art found. Check your Token Art folders in settings, or rescan.";
         grid.appendChild(empty);
         footer.textContent = "0 results";
         return;
@@ -318,7 +375,7 @@ export class TokenArtPicker {
     let timer = null;
     search.addEventListener("input", () => {
       clearTimeout(timer);
-      timer = setTimeout(() => paint(_queryArt(search.value)), 180);
+      timer = setTimeout(() => paint(_run(search.value)), 180);
     });
 
     // ── Draggable by the header (grab + move like a normal window) ──
@@ -351,7 +408,29 @@ export class TokenArtPicker {
     try { document.addEventListener("keydown", TokenArtPicker._onKey, true); } catch (_) {}
     try { search.focus(); } catch (_) {}
 
-    paint(_queryArt(query));
+    syncTabs();
+    paint(_run(query));
+  }
+
+  /**
+   * Portrait pick -> the ACTOR's profile image (actor.img), not the token.
+   * Johnny 2026-08-06: he sets the portrait on the actor so it survives
+   * reloads and shows everywhere the actor does.
+   */
+  static async _applyPortrait(tokenDoc, entry) {
+    try {
+      const actor = tokenDoc?.actor;
+      if (!actor) {
+        ui.notifications?.warn("No actor behind this token — can't set a portrait.");
+        return;
+      }
+      await actor.update({ img: entry.path });
+      ui.notifications?.info(`Portrait set for ${actor.name}: ${entry.fullName || entry.file || "image"}`);
+      TokenArtPicker.close();
+    } catch (err) {
+      console.error(`${MID} | portrait apply failed:`, err);
+      ui.notifications?.error("Failed to set the portrait (see console).");
+    }
   }
 
   static async _apply(tokenDoc, entry) {
