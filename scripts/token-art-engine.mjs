@@ -1326,9 +1326,19 @@ async function _shouldWaitForBio(tokenDoc) {
         // Bio generation explicitly off
         const bioEnabled = game.settings.get("ace-engine", "autoGenerateBio") !== false;
         if (!bioEnabled) return false;
-        // tokenDropAI tier off → pipeline short-circuits
-        const tier = String(game.settings.get("ace-engine", "tokenDropAI") ?? "full");
-        if (tier === "off") return false;
+        // ⚠️ TIERS THAT WRITE NOTHING ON DROP — DO NOT WAIT FOR THEM (2026-08-07).
+        // This asks "is the engine going to rename / role-tag this token, so I
+        // should hold the art chooser until it has?" Only "off" used to count as
+        // no. ace-engine 1.7.52 added "silent" — the new DEFAULT — where a drop
+        // deliberately writes no bio at all and identity is created later, when
+        // a player actually talks to the creature.
+        //
+        // Left unhandled, every silent drop parked the art chooser for the full
+        // 30-second wait on a bio that was never coming. "faction-only" still
+        // belongs in the waiting group: it skips the bio but DOES assign the
+        // faction role this engine reads to refine its search.
+        const tier = String(game.settings.get("ace-engine", "tokenDropAI") ?? "silent");
+        if (tier === "off" || tier === "silent") return false;
         // Non-sentient creatures: bio runs but produces no rename / role
         const creatureType = String(tokenDoc.actor?.system?.details?.type?.value ?? "").toLowerCase();
         if (NO_RENAME_TYPES.has(creatureType)) return false;

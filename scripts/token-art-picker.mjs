@@ -223,6 +223,9 @@ export class TokenArtPicker {
         if (_mode === id) return;
         _mode = id; _page = 0;
         syncTabs();
+        // The save-as-default line says different things for a portrait and a
+        // token, so it has to follow the tab.
+        try { TokenArtPicker._syncDefaultsText?.(); } catch (_) {}
         search.placeholder = id === "portrait" ? "Search portraits by name…" : "Search art by name…";
         paint(_run(search.value));
       });
@@ -263,6 +266,30 @@ export class TokenArtPicker {
       flex: "1", overflowY: "auto", padding: "16px", display: "grid", gap: "14px",
       gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", alignContent: "start",
     });
+
+    // ── "Save as the default" bar ──────────────────────────────────────
+    // Built ONCE and kept outside the footer, because renderPage() wipes the
+    // footer on every search and page turn — a checkbox in there would reset
+    // itself mid-browse.
+    //
+    // Ticked by default: setting a creature's art almost always means "this is
+    // what this creature looks like", and having to re-pick after every drop
+    // was the complaint. Untick it for a genuine one-off — the cracked-face
+    // golem that shouldn't change what the next nine look like.
+    const defaultsBar = document.createElement("label");
+    Object.assign(defaultsBar.style, {
+      display: "flex", alignItems: "center", gap: "10px",
+      padding: "10px 16px", borderTop: "1px solid #4a3a28",
+      background: "#141210", color: "#e9dcb0", fontSize: "15px", cursor: "pointer",
+    });
+    const defaultsBox = document.createElement("input");
+    defaultsBox.type = "checkbox";
+    defaultsBox.id = "ace-ta-save-default";
+    defaultsBox.checked = true;
+    Object.assign(defaultsBox.style, { width: "18px", height: "18px", cursor: "pointer" });
+    const defaultsText = document.createElement("span");
+    defaultsBar.appendChild(defaultsBox);
+    defaultsBar.appendChild(defaultsText);
 
     // ── Footer (result count + pager) ──
     const footer = document.createElement("div");
@@ -308,13 +335,40 @@ export class TokenArtPicker {
       // FULL art name (e.g. "Goblin Minion 01") — not the parsed variant, which drops the
       // base and reads as a confusing "Minion 01". title = same, so hover shows the full name.
       lbl.textContent = entry.fullName || entry.displayVariant || entry.displayBase || "art";
-      lbl.title = lbl.textContent;
+
+      // ── Hover tells you WHICH FILE this actually is ──────────────────────
+      // Johnny, 2026-08-11: "when I hover over the portrait, I want to be able
+      // to see the file name and the path."
+      // The label is a prettified art NAME ("Goblin Minion 01"), which is not
+      // enough to go and find the file, rename it, or work out which of two
+      // near-identical images you are looking at. The tooltip carries the real
+      // filename and the folder it came from.
+      // ⚠️ Put it on the CARD, not just the label — the label is a thin strip
+      // at the bottom and the thing people hover is the picture.
+      const _tip = (() => {
+        try {
+          const full = String(entry.path ?? "");
+          const file = decodeURIComponent(full.split("/").pop() ?? "");
+          const dir  = decodeURIComponent(full.slice(0, full.lastIndexOf("/")) || "");
+          return `${lbl.textContent}
+${file}
+${dir}`;
+        } catch (_) { return lbl.textContent; }
+      })();
+      lbl.title = _tip;
+      card.title = _tip;
+      imgWrap.title = _tip;
+      img.title = _tip;
+
       card.appendChild(imgWrap); card.appendChild(lbl);
       card.addEventListener("mouseenter", () => { card.style.borderColor = "#d4af37"; card.style.transform = "translateY(-2px)"; });
       card.addEventListener("mouseleave", () => { card.style.borderColor = "transparent"; card.style.transform = "none"; });
-      card.addEventListener("click", () => (_mode === "portrait"
-        ? TokenArtPicker._applyPortrait(tokenDoc, entry)
-        : TokenArtPicker._apply(tokenDoc, entry)));
+      card.addEventListener("click", () => {
+        const saveDefault = document.getElementById("ace-ta-save-default")?.checked !== false;
+        return _mode === "portrait"
+          ? TokenArtPicker._applyPortrait(tokenDoc, entry, { saveDefault })
+          : TokenArtPicker._apply(tokenDoc, entry, { saveDefault });
+      });
       return card;
     };
 
@@ -399,8 +453,20 @@ export class TokenArtPicker {
     });
     backdrop.addEventListener("mouseup", () => { _drag = null; });
 
+    // Wording follows the tab, and names the creature so there's no doubt
+    // about what "future ones" means.
+    const _worldName = TokenArtPicker._worldActorFor(tokenDoc)?.name ?? "this creature";
+    const syncDefaultsText = () => {
+      defaultsText.textContent = _mode === "portrait"
+        ? `Also save as the portrait for ${_worldName} in your actors list`
+        : `Also save as the default art for future ${_worldName}s`;
+    };
+    syncDefaultsText();
+    TokenArtPicker._syncDefaultsText = syncDefaultsText;
+
     panel.appendChild(header);
     panel.appendChild(grid);
+    panel.appendChild(defaultsBar);
     panel.appendChild(footer);
     backdrop.appendChild(panel);
     document.body.appendChild(backdrop);
@@ -413,19 +479,53 @@ export class TokenArtPicker {
   }
 
   /**
-   * Portrait pick -> the ACTOR's profile image (actor.img), not the token.
-   * Johnny 2026-08-06: he sets the portrait on the actor so it survives
-   * reloads and shows everywhere the actor does.
+   * The actor in the ACTORS LIST behind this token — never the token's own
+   * private copy, and never a compendium entry.
+   *
+   * ⚠️ `tokenDoc.actor` on an UNLINKED token is a synthetic actor whose writes
+   * land in that token's delta. Portraits were being written there and so never
+   * reached the sidebar: the intent was always "set it on the actor" (Johnny,
+   * 2026-08-06), but on the unlinked tokens that make up nearly every NPC it
+   * silently only ever set it on that one token. (Found + fixed 2026-08-08.)
+   *
+   * Returns null when there is no world actor, or when the actor lives in a
+   * compendium — packs stay pristine, and that is a rule, not a setting.
    */
-  static async _applyPortrait(tokenDoc, entry) {
+  static _worldActorFor(tokenDoc) {
+    const world = game.actors?.get(tokenDoc?.actorId) ?? null;
+    if (!world) return null;
+    if (world.pack) return null;      // compendium — never written to
+    return world;
+  }
+
+  /**
+   * Portrait pick -> the ACTOR's profile image, so it survives reloads and
+   * shows everywhere the actor does.
+   */
+  static async _applyPortrait(tokenDoc, entry, opts = {}) {
     try {
-      const actor = tokenDoc?.actor;
-      if (!actor) {
+      const world = TokenArtPicker._worldActorFor(tokenDoc);
+      const saveDefault = opts.saveDefault !== false;
+      const tokenActor = tokenDoc?.actor;
+
+      if (!world && !tokenActor) {
         ui.notifications?.warn("No actor behind this token — can't set a portrait.");
         return;
       }
-      await actor.update({ img: entry.path });
-      ui.notifications?.info(`Portrait set for ${actor.name}: ${entry.fullName || entry.file || "image"}`);
+
+      // The actors-list entry is the point of a portrait. Fall back to the
+      // token's own copy only when there genuinely isn't one to write to.
+      const target = (saveDefault && world) ? world : tokenActor;
+      await target.update({ img: entry.path });
+
+      const art = entry.fullName || entry.file || "image";
+      if (saveDefault && world) {
+        ui.notifications?.info(`Portrait set for ${world.name} in your actors list: ${art}`);
+      } else if (world) {
+        ui.notifications?.info(`Portrait set on this token only: ${art}. ${world.name} in your actors list is unchanged.`);
+      } else {
+        ui.notifications?.info(`Portrait set on this token: ${art}. (No actors-list entry to save it to — this one may have come from a compendium.)`);
+      }
       TokenArtPicker.close();
     } catch (err) {
       console.error(`${MID} | portrait apply failed:`, err);
@@ -433,12 +533,34 @@ export class TokenArtPicker {
     }
   }
 
-  static async _apply(tokenDoc, entry) {
+  /**
+   * Token art pick -> the token in front of you, so you see it immediately,
+   * AND (unless unticked) the actor's prototype token, so the next one you
+   * drag out already looks right instead of needing the same edit nine times.
+   */
+  static async _apply(tokenDoc, entry, opts = {}) {
     try {
+      const saveDefault = opts.saveDefault !== false;
       await tokenDoc.update({ "texture.src": entry.path });
       // Keep the slow auto-bio art flow from overwriting this manual pick later.
       try { await tokenDoc.actor?.setFlag(MID, "skipAutoArt", true); } catch (_) {}
-      ui.notifications?.info(`Token art set: ${entry.fullName || entry.displayVariant || "art"}`);
+
+      const art = entry.fullName || entry.displayVariant || "art";
+      let savedTo = null;
+      if (saveDefault) {
+        const world = TokenArtPicker._worldActorFor(tokenDoc);
+        if (world) {
+          // Only the deliberate pick you just made writes back. Automatic art
+          // and random variants never call this path — otherwise whichever
+          // variant happened to land last would become the species default.
+          await world.update({ "prototypeToken.texture.src": entry.path });
+          savedTo = world.name;
+        }
+      }
+
+      ui.notifications?.info(savedTo
+        ? `Token art set — and saved as the default for future ${savedTo}s.`
+        : `Token art set on this token only: ${art}.`);
       TokenArtPicker.close();
     } catch (err) {
       console.error(`${MID} | picker apply failed:`, err);
