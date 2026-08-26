@@ -299,7 +299,20 @@ export class TokenArtPicker {
     });
 
     // ── Paging state — big thumbnails, paged so hundreds of results never squish ──
-    const PER_PAGE = 60;
+    //
+    // ⚠️🔴 SIXTY WAS SIXTY DOWNLOADS. Johnny, 2026-08-23: "it does not have to
+    // draw 60 images per page. That is way too fucking many. 10 images per page
+    // is fine at most, because usually the one you are looking for is in the
+    // very first five."
+    //
+    // He is right, and the cost was never the paging, it was that every tile
+    // fetches the FULL-SIZE original and shrinks it into a 280px box. The index
+    // cache cannot help with that — it stores paths, not pixels — so sixty tiles
+    // meant sixty full-size images across a browser connection pool of about
+    // six. This is a picker used mid-session, with players connected, to change
+    // a token RIGHT NOW. Fifteen seconds to become usable means it does not get
+    // used at all.
+    const PER_PAGE = 10;
     let _list = [];
     let _page = 0;
 
@@ -325,7 +338,25 @@ export class TokenArtPicker {
       Object.assign(imgWrap.style, { background: "#000", display: "flex", alignItems: "center", justifyContent: "center" });
       _imp(imgWrap, { flex: "1 1 auto", minHeight: "0", width: "100%" });
       const img = document.createElement("img");
-      img.src = entry.path; img.loading = "lazy";
+      // ⚠️ THE PATH IS PARKED, NOT ASSIGNED. Setting src here starts the fetch
+      // for every tile at the same instant, so the browser runs six at once and
+      // they arrive in whatever order the disk finishes them — the first tile,
+      // the one he is actually looking at, competes with nine others and can
+      // land last. _fillImages below assigns them in reading order instead.
+      img.dataset.aceSrc = entry.path;
+      // ⚠️🔴 NO loading="lazy" HERE, AND THAT IS DELIBERATE (2026-08-23).
+      //
+      // Lazy loading and an explicit ordered loader are two throttles fighting
+      // each other. Worse, a lazily-deferred image fires NEITHER load NOR
+      // error, and _fillImages advances on those events — so a single deferred
+      // tile would stall every remaining tile on the page, permanently, with no
+      // error anywhere. Proven in a real browser: images inside a container the
+      // engine has not decided is "visible" simply never load.
+      //
+      // With ten tiles and the loader below controlling the order, the loader
+      // IS the throttle. Lazy has nothing left to contribute and one way to
+      // break it.
+      img.decoding = "async";
       img.addEventListener("error", () => { img.style.opacity = "0.2"; });
       _imp(img, { width: "100%", height: "100%", objectFit: "contain", maxWidth: "none", maxHeight: "none", border: "none", borderRadius: "0" });
       imgWrap.appendChild(img);
@@ -385,6 +416,66 @@ ${dir}`;
       return b;
     };
 
+    // ── ⚠️ LOAD IN READING ORDER, NOT ALL AT ONCE (2026-08-23) ──────────────
+    //
+    // Johnny: "It seems to download every image that it finds and downloads all
+    // at the same time. Can we not have it so it downloads at least the first 10,
+    // the first sort of thing?"
+    //
+    // Exactly right. Ten simultaneous requests share the connection pool and
+    // complete in whatever order the disk returns them, so the top-left tile —
+    // the one he is looking at, and usually the one he wants — has no priority
+    // at all and frequently arrives last. Feeding them in order gives the first
+    // tiles the bandwidth, so the grid fills top to bottom the way it is read.
+    //
+    // TWO AT A TIME, not one: strictly serial would leave the pipe idle during
+    // each round trip and drag the tail out for no benefit. Two keeps the first
+    // tile essentially as fast as it can be while the rest still overlap.
+    //
+    // ⚠️ IT MUST BE CANCELLABLE. Without the generation check, clicking Next
+    // while page one is still filling leaves the old page's downloads competing
+    // with the new page's for the same six connections — so the page he is
+    // actually looking at gets slower the more he pages around, which is the
+    // opposite of the point.
+    let _fillGeneration = 0;
+    const _fillImages = (gridEl) => {
+      const mine = ++_fillGeneration;
+      const pending = [...gridEl.querySelectorAll("img[data-ace-src]")];
+      let next = 0;
+
+      const startOne = () => {
+        if (mine !== _fillGeneration) return;          // page changed — abandon
+        if (next >= pending.length) return;
+        const img = pending[next++];
+        const src = img.dataset.aceSrc;
+        if (!src) { startOne(); return; }
+        delete img.dataset.aceSrc;
+
+        // ⚠️ ALWAYS ADVANCE, on success OR failure. A missing file that never
+        // fires load would otherwise stall the whole column behind it and look
+        // exactly like the slowness this change exists to remove.
+        // ⚠️ ALWAYS ADVANCE — on success, on failure, OR on a timeout. The
+        // first two are the normal paths. The third exists because an image can
+        // end up in a state where it fires neither event at all, and a chain
+        // that waits forever on one tile is indistinguishable from the original
+        // slowness. Nothing in this loader may depend on an event arriving.
+        let advanced = false;
+        const advance = () => {
+            if (advanced) return;
+            advanced = true;
+            clearTimeout(stall);
+            startOne();
+        };
+        const stall = setTimeout(advance, 6000);
+        img.addEventListener("load",  advance, { once: true });
+        img.addEventListener("error", advance, { once: true });
+        img.src = src;
+      };
+
+      const LANES = 2;
+      for (let i = 0; i < LANES; i++) startOne();
+    };
+
     const renderPage = () => {
       grid.innerHTML = "";
       footer.innerHTML = "";
@@ -403,6 +494,7 @@ ${dir}`;
       const start = _page * PER_PAGE;
       for (const entry of _list.slice(start, start + PER_PAGE)) grid.appendChild(_card(entry));
       try { grid.scrollTop = 0; } catch (_) {}
+      _fillImages(grid);
 
       // Footer: result range on the left, pager on the right.
       const count = document.createElement("div");
@@ -419,6 +511,7 @@ ${dir}`;
       nav.appendChild(_navBtn("Next ›", _page >= pages - 1, () => { _page++; renderPage(); }));
       footer.appendChild(nav);
     };
+
 
     const paint = (list) => {
       _list = Array.isArray(list) ? list : [];

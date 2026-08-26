@@ -361,6 +361,45 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
 function _registerSettings() {
     const s = (key, def) => game.settings.register(MODULE_ID, key, def);
 
+    // ── "Configure Folders" — the dialog, finally reachable ──
+    //
+    // ⚠️🔴 `folder-config-dialog.mjs` is 255 finished lines that nothing
+    // imported. Its own header says it "replaces what used to be edit the array
+    // setting via console", and until now the console was still the only way in.
+    // Johnny, 2026-08-24: "why is that shit in?" - fair. It is a button now.
+    try {
+        game.settings.registerMenu(MODULE_ID, "folderConfig", {
+            name: "Token Art Folders",
+            label: "Add or Edit Folders",
+            hint: "Pick the folders scanned for token art, browse to them, and rescan without leaving the window.",
+            icon: "fa-solid fa-folder-tree",
+            restricted: true,
+            type: class extends FormApplication {
+                static get defaultOptions() {
+                    return foundry.utils.mergeObject(super.defaultOptions, {
+                        id: "ace-token-art-folder-config-launcher",
+                        title: "ACE: Token Art \u2014 Folders",
+                        template: null,
+                        popOut: false,
+                    });
+                }
+                async _render() {
+                    // No form of its own - open the real dialog and get out of the way.
+                    try {
+                        const { openFolderConfigDialog } = await import("./folder-config-dialog.mjs");
+                        await openFolderConfigDialog();
+                    } catch (err) {
+                        console.error(`${MODULE_ID} | could not open the folder dialog:`, err);
+                        ui.notifications?.error("ACE: Token Art \u2014 the folder dialog would not open, see the console.");
+                    }
+                    this.close();
+                }
+            },
+        });
+    } catch (err) {
+        console.warn(`${MODULE_ID} | could not register the folder dialog menu:`, err);
+    }
+
     // ── "Rescan Folders Now" — a plain BUTTON in the settings panel ──
     // There are too few settings here to justify a pop-up, so the folder list
     // and every toggle live inline below. This menu renders nothing: it runs
@@ -607,6 +646,20 @@ Hooks.once("ready", async () => {
     try { await activateTokenArtEngine(); }
     catch (err) { console.warn(`${MODULE_ID} | Activation failed:`, err); }
 
+    // ── Take the escape sequences back off his map ──────────────────────
+    // ⚠️ FIXING THE DESCRIPTOR DOES NOT FIX THE TOKENS IT ALREADY RENAMED.
+    // A rename is persisted in the scene, so names like
+    // "Shadow%20dragon% Shadow Dragon (Huge)" stay on the map forever unless
+    // something goes and takes them off. Four were standing in front of his
+    // players on 2026-08-25. Wrapped in its own try so a failure here can
+    // never take the registrations below it down with it.
+    try {
+      const { sweepEncodedTokenNames } = await import("./name-repair.mjs");
+      await sweepEncodedTokenNames();
+    } catch (err) {
+      console.error(`${MODULE_ID} | token-name repair failed to load:`, err);
+    }
+
     // Load-time path-integrity / self-heal pass — repair any token art paths
     // that broke since last session (renamed/moved/deleted folders). Silent
     // auto-repair with a one-line summary. Backgrounded so it never delays the
@@ -619,6 +672,33 @@ Hooks.once("ready", async () => {
     const mod = game.modules.get(MODULE_ID);
     if (mod) {
         mod.api = {
+            /**
+             * Strip web escape codes out of token names, now, without a reload.
+             *
+             * ⚠️ THE BOOT SWEEP IS NOT THE ONLY WAY IN. Telling a GM to
+             * restart his game to fix four names is asking him to pay for our
+             * bug with his evening. Johnny, 2026-08-25: "I don't see why I have
+             * to reload."
+             *
+             * @param {object} [opts]
+             * @param {boolean} [opts.dryRun] list what would change, write nothing
+             */
+            repairTokenNames: async (opts = {}) => {
+                const { repairEncodedTokenNames } = await import("./name-repair.mjs");
+                const r = await repairEncodedTokenNames(opts);
+                for (const f of r.fixed) {
+                    console.log(`${MODULE_ID} | ${opts.dryRun ? "would repair" : "repaired"} on `
+                        + `"${f.scene}": ${JSON.stringify(f.from)} -> ${JSON.stringify(f.to)}`);
+                }
+                for (const k of r.skipped) {
+                    console.warn(`${MODULE_ID} | could not safely repair "${k.name}" on "${k.scene}".`);
+                }
+                const verb = opts.dryRun ? "would be repaired" : "repaired";
+                ui.notifications?.info(`ACE: ${r.fixed.length} token name(s) ${verb}. `
+                    + `${r.scanned} scanned.`);
+                return r;
+            },
+
             /**
              * Rescan configured folders + rebuild the in-memory index.
              * @param {object} [opts]

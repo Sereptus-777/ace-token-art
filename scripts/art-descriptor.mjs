@@ -105,6 +105,33 @@ export function describeArt(artPath, creatureName = "") {
 
   // Filename only, extension gone.
   let base = artPath.split(/[\\/]/).pop() ?? "";
+
+  // ⚠️🔴 DECODE FIRST, OR EVERY FILE WITH A SPACE IN IT POISONS THE NAME.
+  // Foundry stores art paths URL-ENCODED, so "Shadow Dragon 01.png" arrives
+  // here as "Shadow%20Dragon%2001.png". Nothing below treats a percent sign as
+  // a separator, so the whole filename stayed ONE word, the creature's own
+  // words could never match it, every filter passed it, and the trailing-digit
+  // strip turned it into "shadow%20dragon%".
+  //
+  // Johnny's map on 2026-08-25 carried FOUR of these, in front of his players:
+  //     "Shadow%20dragon% Shadow Dragon (Huge)"
+  //     "Flameskull% Flameskull"
+  //     "Lich% Lich (Legacy)"
+  //     "Arcanaloth% Arcanaloth"
+  //
+  // ⚠️ THIS IS THE CORPSE-ART BUG AGAIN (2026-08-07). Sixteen of eighty-two
+  // death images were unreachable because one side normalised the name and the
+  // other did not — every single file with a SPACE in it. That was fixed in the
+  // death pipeline and the lesson was never carried across to this file.
+  // SHARED NORMALISATION OR IT NEVER MATCHES.
+  try {
+    base = decodeURIComponent(base);
+  } catch (_) {
+    // A malformed escape cannot be decoded. Say nothing rather than invent a
+    // name out of the mangled text — a number is a better answer than garbage.
+    return empty;
+  }
+
   base = base.replace(/\.[a-z0-9]{2,5}$/i, "");
   if (!base) return empty;
 
@@ -131,6 +158,11 @@ export function describeArt(artPath, creatureName = "") {
     if (/^\d+x\d+$/i.test(w)) return false;           // 400x400
     if (NOISE_WORDS.has(lw)) return false;
     if (ownWords.has(lw)) return false;
+    // ⚠️ BELT AND BRACES. The decode above should mean no word ever still
+    // carries a percent sign, but a token name is the most visible text in the
+    // game and a GM must never see an escape sequence on their own map. If one
+    // survives anything upstream, it is dropped rather than displayed.
+    if (lw.includes("%")) return false;
     return true;
   }).map(w => w.toLowerCase().replace(/\d+$/, ""));
 

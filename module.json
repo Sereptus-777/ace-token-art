@@ -2,7 +2,7 @@
   "id": "ace-token-art",
   "title": "ACE — Token Art",
   "description": "Drop a creature on the canvas and a floating chooser pops up showing your own token art — read from one or more user-configured folders (and any subfolders). Filename / folder smarts: 'Goblin/Goblin Boss.webp' is read as 'Goblin' variant 'Boss', 'Air_Large_Elemental_01.png' through '_09.png' inside an 'Air Elemental' folder become 9 numbered variants, CamelCase like 'AirMyrmidon.webp' splits to 'Air Myrmidon'. Mixed category folders (lots of unrelated creatures sharing a directory) are detected and each filename becomes its own creature. Modifier prefixes (Conjured/Summoned/Adult/Young/Ancient/...) are stripped so 'Conjured Air Elemental' still matches your 'Air Elemental' folder. Standalone module — no dependency on the rest of the ACE Suite.",
-  "version": "1.0.25",
+  "version": "1.1.4",
   "compatibility": {
     "minimum": "12.0.0",
     "verified": "13",

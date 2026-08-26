@@ -24,6 +24,8 @@
 
 import { MODULE_ID } from "./ace-token-art.mjs";
 
+import { tokenNameFromArt } from "./art-descriptor.mjs";
+
 const TAG = "ACE: Token Art";
 const IMG_EXT_RE = /\.(webp|png|jpg|jpeg|svg|gif|avif)$/i;
 const VARIANT_SEP = / - /;          // " - " — what splits base from variant
@@ -85,11 +87,13 @@ export async function rebuildPortraitIndex({ silent = false } = {}) {
     }
 
     const t0 = performance.now();
-    const paths = [];
-    for (const folder of folders) {
-        try { for (const f of await _scanFolder(folder)) paths.push(f); }
-        catch (err) { console.warn(`${TAG} | Portrait scan failed for "${folder}":`, err?.message ?? err); }
-    }
+    // ⚠️ ALL ROOTS IN ONE WALK. Looping the folders here re-serialised the
+    // scan even after the walk itself was made concurrent: six roots meant six
+    // sequential walks, so the fix inside _scanFolders would have been mostly
+    // wasted. One call, one bounded pool, all roots.
+    let paths = [];
+    try { paths = await _scanFolders(folders); }
+    catch (err) { console.warn(`${TAG} | Portrait scan failed:`, err?.message ?? err); }
 
     const seen = new Set();
     for (const p of paths) {
@@ -442,32 +446,77 @@ function _hydrateIndexFromCache(entries) {
     _index.ready = true;
 }
 
-/** Walk a folder recursively, return all image file paths (relative to data root). */
-async function _scanFolder(rootPath) {
+// ─── ⚠️🔴 THE SCAN WAS SEQUENTIAL, AND THAT IS THE WHOLE MYSTERY ─────────────
+//
+// Johnny, for months: token art loads instantly sometimes and takes forever
+// other times, with no obvious pattern. There IS a pattern. It is cache hit
+// versus full walk, and the full walk was as slow as it is possible to make it.
+//
+// The old version awaited ONE FilePicker.browse at a time, in a plain queue.
+// Every directory in the tree was a separate round trip taken strictly after
+// the previous one finished. On top of that the CALLERS looped over the
+// configured root folders one at a time as well. So a library of, say, 400
+// creature folders across 6 roots was 400+ serialised requests, and the total
+// time was the sum of every single latency rather than the longest few.
+//
+// Nothing about that was necessary. `_batchedForEach` — bounded concurrency —
+// was already sitting in this very file, written for the integrity sampler and
+// never used for the thing that actually hurts.
+//
+// ⚠️ CONCURRENCY MAKES ORDER NONDETERMINISTIC, AND THAT MATTERS HERE. The old
+// walk returned paths in a fixed breadth-first order, and downstream grouping
+// picks variants out of that list. Left alone, two scans of an unchanged
+// library could produce different art for the same creature, which would read
+// as a haunting rather than a bug. The result is sorted before it is returned,
+// so the order is now stable BY DEFINITION rather than by accident.
+//
+// ⚠️ THE POOL IS BOUNDED ON PURPOSE. Firing every directory at once would be
+// faster on a local disk and would hammer a hosted Foundry (Forge, Molten) hard
+// enough to be throttled or to stall the world for everyone. Eight is what the
+// integrity sampler in this file already uses against the same API.
+const SCAN_CONCURRENCY = 8;
+
+/**
+ * Walk every configured root at once, breadth-first, a bounded level at a time.
+ *
+ * @param {string[]} rootPaths
+ * @returns {Promise<string[]>} image paths, deduplicated and sorted
+ */
+async function _scanFolders(rootPaths) {
     const FP = foundry.applications?.apps?.FilePicker?.implementation ?? globalThis.FilePicker;
     const found = [];
-    const queue = [rootPath];
     const visited = new Set();
+    let level = [...new Set(rootPaths.filter(Boolean))];
+    let dirCount = 0;
 
-    while (queue.length) {
-        const dir = queue.shift();
-        if (visited.has(dir)) continue;
-        visited.add(dir);
+    while (level.length) {
+        const next = [];
+        // ⚠️ visited is checked and set BEFORE the first await, so two copies of
+        // the same directory inside one batch cannot both browse it. Moving that
+        // check after the await would reintroduce duplicate work silently.
+        await _batchedForEach(level, SCAN_CONCURRENCY, async (dir) => {
+            if (visited.has(dir)) return;
+            visited.add(dir);
+            dirCount++;
 
-        let result;
-        try {
-            result = await FP.browse("data", dir);
-        } catch (err) {
-            console.warn(`${TAG} | Can't browse "${dir}":`, err?.message ?? err);
-            continue;
-        }
-        for (const file of result.files ?? []) {
-            if (IMG_EXT_RE.test(file)) found.push(file);
-        }
-        for (const sub of result.dirs ?? []) {
-            queue.push(sub);
-        }
+            let result;
+            try {
+                result = await FP.browse("data", dir);
+            } catch (err) {
+                console.warn(`${TAG} | Can't browse "${dir}":`, err?.message ?? err);
+                return;
+            }
+            for (const file of result.files ?? []) {
+                if (IMG_EXT_RE.test(file)) found.push(file);
+            }
+            for (const sub of result.dirs ?? []) next.push(sub);
+        });
+        level = next;
     }
+
+    found.sort();
+    console.log(`${TAG} | Walked ${dirCount} director${dirCount === 1 ? "y" : "ies"} `
+        + `(${SCAN_CONCURRENCY} at a time) and found ${found.length} image(s).`);
     return found;
 }
 
@@ -532,12 +581,10 @@ export async function rebuildTokenArtIndex({ useCache = true, silent = false } =
     }
     const t0 = performance.now();
 
-    const allPaths = [];
-    for (const folder of folders) {
-        const files = await _scanFolder(folder);
-        for (const f of files) allPaths.push(f);
-    }
-    // Dedupe by path
+    // ⚠️ ONE WALK ACROSS EVERY ROOT — see the note on _scanFolders. This loop
+    // was the outer half of the same serialisation.
+    const allPaths = await _scanFolders(folders);
+    // Dedupe by path (the walk already dedupes directories, not files across roots)
     const uniquePaths = [...new Set(allPaths)];
 
     // Set of scan-root paths (lowercased, no trailing slash) so _parsePath
@@ -1087,15 +1134,40 @@ async function _applyArt(tokenDoc, entry, { renameSuffix = null } = {}) {
     // Auto-rename only when caller passes a non-null renameSuffix AND the
     // tokenDoc currently has the BASE name (so we don't clobber a hand-picked
     // name like "Strahd").
-    if (renameSuffix) {
-        const autoRename = (() => {
-            try { return !!game.settings.get(MODULE_ID, "tokenArtAutoRename"); }
-            catch (_) { return false; }
-        })();
-        if (autoRename) {
-            const newName = `${tokenDoc.name} ${renameSuffix}`.trim();
-            if (newName !== tokenDoc.name) update.name = newName;
+    const autoRename = (() => {
+        try { return !!game.settings.get(MODULE_ID, "tokenArtAutoRename"); }
+        catch (_) { return false; }
+    })();
+    if (autoRename) {
+        // ⚠️🔴 READ THE ART, NOT JUST THE FOLDER IT CAME FROM.
+        //
+        // `art-descriptor.mjs` was written on 2026-08-08 for exactly this and
+        // then never imported by anything - 212 finished lines sitting in the
+        // module doing nothing. Johnny asked for it twice:
+        //
+        //   "I'm really tired of seeing golem one, golem two... but I definitely
+        //    need to tell the difference between which goblin is what, and so
+        //    did the players."
+        //
+        // His art already says what each one is. `Goblin_Archer_Bow_03` is a
+        // Goblin Archer; `Drow_Matron_Mother_Rod` is a Drow Matron Mother. "I
+        // shoot the bomber first" is a sentence a person says at a table.
+        // "I shoot Goblin 4" is inventory management.
+        //
+        // ⚠️ THE FILENAME WINS, THE SUFFIX IS THE FALLBACK. The descriptor
+        // returns null when the art says nothing useful, and only then do we
+        // fall back to the caller's variant suffix - so a tidy library gets real
+        // names and an untidy one behaves exactly as it did before.
+        let newName = null;
+        try {
+            newName = tokenNameFromArt(entry.path, tokenDoc.name);
+        } catch (err) {
+            console.warn(`${TAG} | could not read a name out of "${entry?.path}":`, err);
         }
+        if (!newName && renameSuffix) newName = `${tokenDoc.name} ${renameSuffix}`.trim();
+        // ⚠️ NEVER CLOBBER A NAME A PERSON CHOSE. Only rename while the token
+        // still carries the plain creature name; "Strahd" stays "Strahd".
+        if (newName && newName !== tokenDoc.name) update.name = newName;
     }
     try { await tokenDoc.update(update); }
     catch (err) { console.warn(`${TAG} | Token update failed:`, err); }
