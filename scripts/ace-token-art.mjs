@@ -13,6 +13,8 @@ import {
     rebuildTokenArtIndex,
     getTokenArtIndex,
     rebuildPortraitIndex,
+    getProneIndex,
+    rebuildProneIndex,
     getPortraitIndex,
     auditAndRepairTokenPaths,
 } from "./token-art-engine.mjs";
@@ -70,6 +72,7 @@ const ACETokenArtFolders = {
     _kinds: {
         token:    { store: "tokenArtFolders",         text: "tokenArtFoldersList",         label: "Token art" },
         portrait: { store: "tokenArtPortraitFolders", text: "tokenArtPortraitFoldersList", label: "Portrait art" },
+        prone:    { store: "tokenArtProneFolders",    text: "tokenArtProneFoldersList",    label: "Prone art" },
     },
 
     /**
@@ -145,23 +148,41 @@ const ACETokenArtFolders = {
             if (JSON.stringify(current) === JSON.stringify(folders)) return;
 
             await game.settings.set(MODULE_ID, k.store, folders);
+            // ⚠️🔴 THIS WAS "PORTRAIT OR ELSE", AND ELSE MEANT TOKEN ART.
+            // With a third kind that shape silently rescans the token index
+            // whenever a PRONE folder changes, and never rebuilds prone at all:
+            // the folder would save, the tab would stay empty, and nothing would
+            // say why. Dispatched by kind now, so a fourth cannot repeat it.
+            const api = game.modules.get(MODULE_ID)?.api;
+            const rescan = {
+                portrait: async () => {
+                    const res = await api?.rescanPortraitArt?.({ silent: true });
+                    return `${(res?.fileCount ?? 0).toLocaleString()} portraits indexed.`;
+                },
+                prone: async () => {
+                    const res = await api?.rescanProneArt?.({ silent: true });
+                    return `${(res?.fileCount ?? 0).toLocaleString()} prone images indexed.`;
+                },
+                token: async () => {
+                    const res = await api?.rescanTokenArt?.({ useCache: false });
+                    return `${(res?.fileCount ?? 0).toLocaleString()} files across `
+                         + `${(res?.baseCount ?? 0).toLocaleString()} creatures.`;
+                },
+            }[kind] ?? null;
+
+            if (!rescan) {
+                console.error(`${MODULE_ID} | "${kind}" has no rescan, so its folder list saved `
+                    + `but its index was NOT rebuilt.`);
+                return;
+            }
+
             if (!folders.length) {
                 ui.notifications?.warn(`ACE: Token Art — no ${k.label.toLowerCase()} folders configured; that index is empty.`);
-                if (kind === "portrait") await game.modules.get(MODULE_ID)?.api?.rescanPortraitArt?.({ silent: true });
+                await rescan();
                 return;
             }
             ui.notifications?.info(`ACE: Token Art — ${k.label.toLowerCase()} folders updated, rescanning ${folders.length}…`);
-
-            const api = game.modules.get(MODULE_ID)?.api;
-            if (kind === "portrait") {
-                const res = await api?.rescanPortraitArt?.({ silent: true });
-                ui.notifications?.info(`ACE: Token Art — ${(res?.fileCount ?? 0).toLocaleString()} portraits indexed.`);
-            } else {
-                const res = await api?.rescanTokenArt?.({ useCache: false });
-                ui.notifications?.info(
-                    `ACE: Token Art — ${(res?.fileCount ?? 0).toLocaleString()} files across ${(res?.baseCount ?? 0).toLocaleString()} creatures.`
-                );
-            }
+            ui.notifications?.info(`ACE: Token Art — ${await rescan()}`);
         } catch (err) {
             console.error(`${MODULE_ID} | Applying ${k.label.toLowerCase()} folder list failed:`, err);
             ui.notifications?.error(`ACE: Token Art — could not apply that ${k.label.toLowerCase()} folder list; see the console.`);
@@ -203,7 +224,7 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
         const root = (html instanceof HTMLElement) ? html : (html?.[0] ?? null);
         if (!root) return;
 
-        for (const key of ["tokenArtFoldersList", "tokenArtPortraitFoldersList"]) {
+        for (const key of ["tokenArtFoldersList", "tokenArtPortraitFoldersList", "tokenArtProneFoldersList"]) {
             const input = root.querySelector(`[name="${MODULE_ID}.${key}"]`);
             if (!input || input.dataset.aceRows) continue;
 
@@ -293,7 +314,12 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
             // count) keeps its full paths; corrupted text loses to the array and
             // the rows come out right. Split on newlines only — a space belongs
             // to a folder name like "My Tokens", never separates two paths.
-            const storeKey = key === "tokenArtPortraitFoldersList" ? "tokenArtPortraitFolders" : "tokenArtFolders";
+            // ⚠️ A TERNARY THAT ONLY KNEW TWO KINDS. Adding prone through it would
+            // have filed every prone folder under token art, silently, and the two
+            // lists would have fought on the next save. Keyed off the kinds table so
+            // a fourth kind cannot repeat this.
+            const storeKey = Object.values(ACETokenArtFolders._kinds)
+              .find(k => k.text === key)?.store ?? "tokenArtFolders";
             const fromText = String(input.value ?? "").split("\n").map(v => v.trim()).filter(Boolean);
             let fromArray = [];
             try {
@@ -436,13 +462,16 @@ function _registerSettings() {
 
                         const tFolders = game.settings.get(MODULE_ID, "tokenArtFolders") ?? [];
                         const pFolders = game.settings.get(MODULE_ID, "tokenArtPortraitFolders") ?? [];
+                        const rFolders = game.settings.get(MODULE_ID, "tokenArtProneFolders") ?? [];
 
                         const tokenRes    = await api?.rescanTokenArt?.({ useCache: false, silent: true });
                         const portraitRes = await api?.rescanPortraitArt?.({ silent: true });
+                        const proneRes    = await api?.rescanProneArt?.({ silent: true });
 
                         const parts = [
                             `Token art: ${(tokenRes?.fileCount ?? 0).toLocaleString()} files / ${(tokenRes?.baseCount ?? 0).toLocaleString()} creatures across ${tFolders.length} folder${tFolders.length === 1 ? "" : "s"}`,
                             `Portraits: ${(portraitRes?.fileCount ?? 0).toLocaleString()} files across ${pFolders.length} folder${pFolders.length === 1 ? "" : "s"}`,
+                            `Prone: ${(proneRes?.fileCount ?? 0).toLocaleString()} files across ${rFolders.length} folder${rFolders.length === 1 ? "" : "s"}`,
                         ];
                         ui.notifications?.info(`ACE: Token Art — rescan complete. ${parts.join(" · ")}`, { permanent: true });
                         console.log(`${MODULE_ID} | Rescan complete.\n  Token folders   : ${tFolders.join(", ") || "(none)"}\n  Portrait folders: ${pFolders.join(", ") || "(none)"}`);
@@ -531,6 +560,30 @@ function _registerSettings() {
         default: "",
         config: true,
         onChange: (raw) => { ACETokenArtFolders.applyFromText(raw, "portrait"); },
+    });
+
+    // ── Prone art: a THIRD tree, for creatures lying down ──
+    // Johnny, 2026-09-02. ace-qol swaps a creature's token to this art when it
+    // goes prone, and until now the only way to give it one was to drop a
+    // correctly named file in a fixed folder and hope the name matched.
+    //
+    // ⚠️ DEFAULTED TO THE FOLDER HIS ART IS ALREADY IN, so the tab has content
+    // the first time he opens it instead of telling him to go configure it.
+    s("tokenArtProneFolders", {
+        scope: "world",
+        config: false,          // storage — edited via the text field below
+        type: Array,
+        default: ["modules/ace-qol/Assets/Prone"],
+    });
+
+    s("tokenArtProneFoldersList", {
+        scope: "world",
+        name: "Prone Art Folders",
+        hint: "Pictures of creatures lying down, for the picker's Prone tab. ACE QOL swaps a token to this art while it is prone.",
+        type: String,
+        default: "modules/ace-qol/Assets/Prone",
+        config: true,
+        onChange: (raw) => { ACETokenArtFolders.applyFromText(raw, "prone"); },
     });
 
     s("tokenArtEnabled", {
@@ -742,6 +795,33 @@ Hooks.once("ready", async () => {
                     fullName: e.fullName,
                     path:     e.path,
                 }));
+            },
+
+            // ── Prone (separate folders, separate index) ──
+            getProneIndex,
+            /** Rebuild the prone index from the configured prone folders. */
+            rescanProneArt: async (opts = {}) => {
+                try { await ACETokenArtFolders.reconcileFromText(); } catch (_) {}
+                return rebuildProneIndex(opts);
+            },
+            /** Filename search over prone art; empty query returns them all. */
+            searchProneArt: (query) => {
+                const idx = getProneIndex();
+                const q = String(query ?? "").toLowerCase().trim();
+                if (!q) return idx.all.slice();
+                const words = q.split(/\s+/).filter(Boolean);
+                const scored = [];
+                for (const e of idx.all) {
+                    const h = e.fullLower;
+                    let score = 0;
+                    if (h.includes(q)) score = 100;
+                    else if (words.length > 1 && words.every(w => h.includes(w))) score = 60;
+                    else if (h.includes(words[0] ?? q)) score = 40;
+                    else if (words.some(w => h.includes(w))) score = 20;
+                    if (score) scored.push({ e, score });
+                }
+                scored.sort((a, b) => b.score - a.score);
+                return scored.map(s => s.e);
             },
 
             // ── Portraits (separate folders, separate index) ──

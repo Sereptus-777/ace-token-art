@@ -48,10 +48,50 @@ export async function openFolderConfigDialog() {
       </div>
     `;
 
-    const folders = (() => {
-        try { return (game.settings.get(MODULE_ID, "tokenArtFolders") ?? []).slice(); }
+    // ⚠️🔴 THIS DIALOG ONLY EVER EDITED TOKEN ART, AND NOTHING SAID SO.
+    // Johnny, 2026-09-02: "when I re-scan, it doesn't scan my new prone
+    // folders." He had added them through this button, which is the most
+    // obvious way in, and every folder he typed went into the TOKEN art list.
+    // The prone list stayed empty, the prone index stayed empty, and the rescan
+    // faithfully reported nothing. Three hardcoded `tokenArtFolders` calls, and
+    // a title that just said "Folder Configuration".
+    //
+    // ⚠️ AND IT WROTE ONLY THE ARRAY. Each kind has a stored array the engine
+    // scans and a text mirror shown in the settings list, and `reconcileFromText`
+    // pushes the TEXT over the array at every boot. So even for token art, a
+    // folder added here survived until the next reload and then vanished, with
+    // nothing to say where it went. Both halves are written now.
+    const KINDS = {
+        token:    { store: "tokenArtFolders",         text: "tokenArtFoldersList",
+                    label: "Token art",    api: "rescanTokenArt",    args: { useCache: false },
+                    blurb: "Top-down artwork placed on the map." },
+        portrait: { store: "tokenArtPortraitFolders", text: "tokenArtPortraitFoldersList",
+                    label: "Portrait art", api: "rescanPortraitArt", args: {},
+                    blurb: "Face images used as an actor's profile picture." },
+        prone:    { store: "tokenArtProneFolders",    text: "tokenArtProneFoldersList",
+                    label: "Prone art",    api: "rescanProneArt",    args: {},
+                    blurb: "Pictures of creatures lying down, swapped in when one is knocked prone." },
+    };
+    let _kind = "token";
+
+    const readFolders = (kind) => {
+        try { return (game.settings.get(MODULE_ID, KINDS[kind].store) ?? []).slice(); }
         catch (_) { return []; }
-    })();
+    };
+
+    /** Write BOTH halves so the next boot's reconcile cannot undo this. */
+    const writeFolders = async (kind, folders) => {
+        const k = KINDS[kind];
+        await game.settings.set(MODULE_ID, k.store, folders);
+        try { await game.settings.set(MODULE_ID, k.text, folders.join("\n")); }
+        catch (err) {
+            console.warn(`${TAG} | saved the ${k.label.toLowerCase()} folders but could not `
+                + `update the text box that mirrors them, so the settings list will `
+                + `disagree until you reopen it:`, err);
+        }
+    };
+
+    const folders = readFolders(_kind);
 
     const content = `
       <div style="padding: 4px 8px;">
@@ -61,7 +101,18 @@ export async function openFolderConfigDialog() {
           included automatically.
         </p>
 
-        <div style="font-size:12px; font-weight:600; color:#d4af37; margin: 10px 0 6px 0; letter-spacing:0.5px;">
+        <div id="atac-kinds" style="display:flex; gap:6px; margin: 10px 0 8px 0;">
+          ${Object.entries(KINDS).map(([id, k]) => `
+            <button type="button" class="atac-kind-btn" data-kind="${id}"
+              style="flex:1; padding:7px 10px; border-radius:5px; cursor:pointer; font-size:13px;
+                     font-weight:600; border:1px solid #6b5530; background:#0c0a08; color:#c9b48a;">
+              ${k.label}
+            </button>`).join("")}
+        </div>
+
+        <div id="atac-blurb" style="font-size:12px; color:#9c8a64; font-style:italic; margin-bottom:8px;"></div>
+
+        <div id="atac-heading" style="font-size:12px; font-weight:600; color:#d4af37; margin: 10px 0 6px 0; letter-spacing:0.5px;">
           FOLDERS TO SCAN:
         </div>
 
@@ -130,7 +181,58 @@ export async function openFolderConfigDialog() {
         return [...inputs].map(i => i.value.trim()).filter(Boolean);
     };
 
+    /** Repaint the row list from whichever kind is selected. */
+    const repaint = (rootEl) => {
+        const k = KINDS[_kind];
+        const list = rootEl.querySelector("#atac-folder-list");
+        const rows = readFolders(_kind);
+        if (list) {
+            list.innerHTML = rows.length
+              ? rows.map((f, i) => renderRow(f, i)).join("")
+              : `<div style="color:#888; font-style:italic; font-size:12px; padding:6px;">No folders configured. Click "Add Folder" to get started.</div>`;
+        }
+        const heading = rootEl.querySelector("#atac-heading");
+        if (heading) heading.textContent = `${k.label.toUpperCase()} FOLDERS TO SCAN:`;
+        const blurb = rootEl.querySelector("#atac-blurb");
+        if (blurb) blurb.textContent = k.blurb;
+        for (const b of rootEl.querySelectorAll(".atac-kind-btn")) {
+            const on = b.dataset.kind === _kind;
+            b.style.background  = on ? "#d4af37" : "#0c0a08";
+            b.style.color       = on ? "#15110d" : "#c9b48a";
+            b.style.borderColor = on ? "#f0d98a" : "#6b5530";
+        }
+        bindRows(rootEl);
+    };
+
+    const bindRows = (rootEl) => {
+        rootEl.querySelectorAll(".atac-row").forEach(row => {
+            const input  = row.querySelector(".atac-folder-input");
+            const browse = row.querySelector(".atac-browse-btn");
+            const remove = row.querySelector(".atac-remove-btn");
+            if (browse && input && !browse.dataset.bound) { bindBrowse(browse, input); browse.dataset.bound = "1"; }
+            if (remove && !remove.dataset.bound)          { bindRemove(remove, row);   remove.dataset.bound = "1"; }
+        });
+    };
+
     const wireInteractivity = (rootEl) => {
+        // ⚠️ SWITCHING KIND SAVES THE ROWS ON SCREEN FIRST. Without this, typing
+        // three folders and then clicking another tab throws them away with no
+        // warning, which is the same silent loss the dialog already had.
+        for (const b of rootEl.querySelectorAll(".atac-kind-btn")) {
+            b.addEventListener("click", async () => {
+                const next = b.dataset.kind;
+                if (next === _kind) return;
+                try { await writeFolders(_kind, collectFolders(rootEl)); }
+                catch (err) { console.warn(`${TAG} | could not save before switching kind:`, err); }
+                _kind = next;
+                repaint(rootEl);
+                const status = rootEl.querySelector("#atac-status");
+                if (status) status.innerHTML = `Editing <strong>${KINDS[_kind].label}</strong> folders. `
+                    + `Click <strong>Rescan Now</strong> after editing to rebuild that index.`;
+            });
+        }
+        repaint(rootEl);
+
         // Existing rows
         rootEl.querySelectorAll(".atac-row").forEach(row => {
             const input  = row.querySelector(".atac-folder-input");
@@ -170,15 +272,25 @@ export async function openFolderConfigDialog() {
             // Save current edits first, THEN rescan — rescan reads the
             // setting fresh each time. Pass useCache:false so this button
             // ALWAYS does a fresh disk scan (the whole point of the button).
+            const k = KINDS[_kind];
             const folders = collectFolders(rootEl);
-            await game.settings.set(MODULE_ID, "tokenArtFolders", folders);
-            const result = await game.modules.get(MODULE_ID).api.rescanTokenArt({ useCache: false });
+            await writeFolders(_kind, folders);
+            const api = game.modules.get(MODULE_ID)?.api;
+            // ⚠️ NAMED, NOT ASSUMED. If a kind ever loses its rescan the status
+            // must say so rather than report a successful scan of nothing.
+            if (typeof api?.[k.api] !== "function") {
+                throw new Error(`${k.label} has no rescan function (${k.api}) on the module API.`);
+            }
+            const result = await api[k.api](k.args);
             if (status) {
                 const fileCount = result?.fileCount ?? 0;
-                const baseCount = result?.baseCount ?? 0;
-                status.innerHTML = `<span style="color:#a0e0a0;"><i class="fas fa-check"></i> Scan complete: <strong>${fileCount.toLocaleString()}</strong> files / <strong>${baseCount.toLocaleString()}</strong> creature bases indexed. Cache saved.</span>`;
+                const baseCount = result?.baseCount;
+                const bases = Number.isFinite(baseCount) ? ` / <strong>${baseCount.toLocaleString()}</strong> creature bases` : "";
+                status.innerHTML = `<span style="color:#a0e0a0;"><i class="fas fa-check"></i> ${k.label} scan complete: `
+                    + `<strong>${fileCount.toLocaleString()}</strong> files${bases} across `
+                    + `<strong>${folders.length}</strong> folder${folders.length === 1 ? "" : "s"}.</span>`;
             }
-            ui.notifications?.info?.(`ACE: Token Art — indexed ${result?.fileCount ?? 0} files. Cache saved for next reload.`);
+            ui.notifications?.info?.(`ACE: Token Art — ${k.label.toLowerCase()}: indexed ${result?.fileCount ?? 0} file(s).`);
         } catch (err) {
             console.error(`${TAG} | Rescan failed:`, err);
             if (status) status.innerHTML = `<span style="color:#e08080;"><i class="fas fa-exclamation-triangle"></i> Rescan failed: ${escape(err.message ?? String(err))}</span>`;
@@ -186,15 +298,17 @@ export async function openFolderConfigDialog() {
     };
 
     const doSave = async (rootEl) => {
+        const k = KINDS[_kind];
         const folders = collectFolders(rootEl);
-        await game.settings.set(MODULE_ID, "tokenArtFolders", folders);
-        ui.notifications?.info?.(`ACE: Token Art — saved ${folders.length} folder${folders.length === 1 ? "" : "s"}. Click Rescan to rebuild the index.`);
+        await writeFolders(_kind, folders);
+        ui.notifications?.info?.(`ACE: Token Art — saved ${folders.length} ${k.label.toLowerCase()} `
+            + `folder${folders.length === 1 ? "" : "s"}. Click Rescan to rebuild that index.`);
     };
 
     // ── Use DialogV2 when available (Foundry V13 native) ───────────────────
     if (DialogV2) {
         const root = await DialogV2.prompt({
-            window: { title: "ACE: Token Art — Folder Configuration", icon: "fa-folder-tree" },
+            window: { title: "ACE: Token Art — Token, Portrait and Prone Folders", icon: "fa-folder-tree" },
             position: { width: 620 },
             content,
             ok: { label: "Save & Close", icon: "fa-save", callback: async (_event, _button, dialog) => {
@@ -217,7 +331,7 @@ export async function openFolderConfigDialog() {
     // ── V1 fallback ────────────────────────────────────────────────────────
     return new Promise(resolve => {
         const d = new Dialog({
-            title: "ACE: Token Art — Folder Configuration",
+            title: "ACE: Token Art — Token, Portrait and Prone Folders",
             content,
             buttons: {
                 rescan: {

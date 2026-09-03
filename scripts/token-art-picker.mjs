@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MID = "ace-token-art";
-const PICKER_BUILD = "1.0.12";   // shown in the header — if you don't see this number, the new file isn't loading
+const PICKER_BUILD = "1.1.0";   // shown in the header — if you don't see this number, the new file isn't loading
 
 function _api() { return game.modules.get(MID)?.api ?? null; }
 
@@ -66,6 +66,22 @@ function _queryArt(name) {
  * terrible portrait, and silently offering one would be worse than an
  * empty tab that tells you to set the folder.
  */
+/**
+ * Prone lookup — its own index over its own folders.
+ *
+ * ⚠️ NEVER FALLS BACK TO TOKEN ART, for the same reason portraits do not: a
+ * standing top-down token is exactly the wrong picture for a creature that has
+ * been knocked down, and quietly offering one would undo the whole point of the
+ * feature. An empty tab that names the setting is the honest answer.
+ */
+function _queryProne(name) {
+  const api = _api();
+  try {
+    const r = api?.searchProneArt?.(String(name ?? "").trim());
+    return Array.isArray(r) ? r : [];
+  } catch (_) { return []; }
+}
+
 function _queryPortraits(name) {
   const api = _api();
   try {
@@ -169,8 +185,22 @@ export class TokenArtPicker {
   static _render(tokenDoc, query) {
     // Which tab is live. Declared FIRST so every handler below closes over an
     // already-initialised binding — no temporal-dead-zone surprises.
-    let _mode = "token";              // "token" (texture.src) | "portrait" (actor.img)
-    const _run = (q) => (_mode === "portrait" ? _queryPortraits(q) : _queryArt(q));
+    // ⚠️ A TERNARY IS NOT A THIRD TAB. Every "portrait or else" in this file
+    // meant "else token art", so a prone tab bolted onto that shape would have
+    // shown the token index and applied a token-art write. Table-driven now.
+    let _mode = "token";   // "token" texture.src | "portrait" actor.img | "prone" prone flag
+    const KINDS = {
+      token:    { label: "Token Art", icon: "fa-chess-pawn",
+                  query: _queryArt,       placeholder: "Search art by name…",
+                  empty: "No art found. Check your Token Art folders in settings, or rescan." },
+      portrait: { label: "Portrait",  icon: "fa-user",
+                  query: _queryPortraits, placeholder: "Search portraits by name…",
+                  empty: "No portraits found. Set 'Portrait Art Folders' in the module settings, then rescan." },
+      prone:    { label: "Prone",     icon: "fa-person-falling",
+                  query: _queryProne,     placeholder: "Search prone art by name…",
+                  empty: "No prone art found. Set 'Prone Art Folders' in the module settings, then rescan." },
+    };
+    const _run = (q) => KINDS[_mode].query(q);
 
     // ── Backdrop ──
     const backdrop = document.createElement("div");
@@ -226,16 +256,15 @@ export class TokenArtPicker {
         // The save-as-default line says different things for a portrait and a
         // token, so it has to follow the tab.
         try { TokenArtPicker._syncDefaultsText?.(); } catch (_) {}
-        search.placeholder = id === "portrait" ? "Search portraits by name…" : "Search art by name…";
+        search.placeholder = KINDS[id].placeholder;
         paint(_run(search.value));
       });
       tabs.appendChild(t);
       return t;
     };
-    const tabToken    = mkTab("token", "Token Art", "fa-chess-pawn");
-    const tabPortrait = mkTab("portrait", "Portrait", "fa-user");
+    const tabEls = Object.entries(KINDS).map(([id, k]) => mkTab(id, k.label, k.icon));
     const syncTabs = () => {
-      for (const t of [tabToken, tabPortrait]) {
+      for (const t of tabEls) {
         const on = t.dataset.mode === _mode;
         t.style.background  = on ? "#d4af37" : "#0c0a08";
         t.style.color       = on ? "#15110d" : "#c9b48a";
@@ -396,9 +425,9 @@ ${dir}`;
       card.addEventListener("mouseleave", () => { card.style.borderColor = "transparent"; card.style.transform = "none"; });
       card.addEventListener("click", () => {
         const saveDefault = document.getElementById("ace-ta-save-default")?.checked !== false;
-        return _mode === "portrait"
-          ? TokenArtPicker._applyPortrait(tokenDoc, entry, { saveDefault })
-          : TokenArtPicker._apply(tokenDoc, entry, { saveDefault });
+        if (_mode === "portrait") return TokenArtPicker._applyPortrait(tokenDoc, entry, { saveDefault });
+        if (_mode === "prone")    return TokenArtPicker._applyProne(tokenDoc, entry, { saveDefault });
+        return TokenArtPicker._apply(tokenDoc, entry, { saveDefault });
       });
       return card;
     };
@@ -482,9 +511,7 @@ ${dir}`;
       if (!_list.length) {
         const empty = document.createElement("div");
         Object.assign(empty.style, { gridColumn: "1/-1", textAlign: "center", color: "#9c8a64", padding: "44px", fontSize: "16px" });
-        empty.textContent = _mode === "portrait"
-          ? "No portraits found. Set 'Portrait Art Folders' in the module settings, then rescan."
-          : "No art found. Check your Token Art folders in settings, or rescan.";
+        empty.textContent = KINDS[_mode].empty;
         grid.appendChild(empty);
         footer.textContent = "0 results";
         return;
@@ -550,9 +577,10 @@ ${dir}`;
     // about what "future ones" means.
     const _worldName = TokenArtPicker._worldActorFor(tokenDoc)?.name ?? "this creature";
     const syncDefaultsText = () => {
-      defaultsText.textContent = _mode === "portrait"
-        ? `Also save as the portrait for ${_worldName} in your actors list`
-        : `Also save as the default art for future ${_worldName}s`;
+      defaultsText.textContent =
+        _mode === "portrait" ? `Also save as the portrait for ${_worldName} in your actors list`
+      : _mode === "prone"    ? `Also use this prone art for future ${_worldName}s`
+      :                        `Also save as the default art for future ${_worldName}s`;
     };
     syncDefaultsText();
     TokenArtPicker._syncDefaultsText = syncDefaultsText;
@@ -589,6 +617,58 @@ ${dir}`;
     if (!world) return null;
     if (world.pack) return null;      // compendium — never written to
     return world;
+  }
+
+  /**
+   * Prone pick -> a flag naming the picture, NOT a texture swap.
+   *
+   * ⚠️🔴 IT MUST NOT WRITE `texture.src`, WHICH IS THE OBVIOUS THING TO DO.
+   * ace-qol's prone swapper parks the creature's standing artwork on the token
+   * while it is down and puts it back when it stands up. Writing the prone
+   * picture straight onto the token here would make a standing creature look
+   * like it is lying down, and the first time it actually went prone the
+   * swapper would park the PRONE art as its standing look and hand that back
+   * when it got up. One click and the creature is on its back forever.
+   *
+   * So this records WHICH picture to use, and the swapper reads it when the
+   * creature is actually knocked down.
+   *
+   * ⚠️ THE WORLD ACTOR, NOT THE TOKEN'S PRIVATE COPY, when saving as default.
+   * Nearly every NPC on a map is unlinked, and `tokenDoc.actor` on an unlinked
+   * token is a synthetic actor whose writes land in that one token's delta. The
+   * portraits had exactly this bug and it took two days to find (2026-08-08),
+   * so this uses the same reader that fixed it.
+   */
+  static async _applyProne(tokenDoc, entry, opts = {}) {
+    try {
+      const world = TokenArtPicker._worldActorFor(tokenDoc);
+      const saveDefault = opts.saveDefault !== false;
+      const tokenActor = tokenDoc?.actor;
+
+      if (!world && !tokenActor) {
+        ui.notifications?.warn("No actor behind this token — nowhere to record prone art.");
+        return;
+      }
+
+      const target = (saveDefault && world) ? world : tokenActor;
+      // ⚠️ THE FLAG LIVES IN ace-qol's NAMESPACE because ace-qol is what reads
+      // it. Filing it under this module would mean the swapper had to know
+      // about a module that may not be installed.
+      await target.setFlag("ace-qol", "proneArt", entry.path);
+
+      const art = entry.fullName || entry.file || "image";
+      if (saveDefault && world) {
+        ui.notifications?.info(`Prone art set for ${world.name}: ${art}. It will be used whenever one is knocked down.`);
+      } else if (world) {
+        ui.notifications?.info(`Prone art set on this token only: ${art}. ${world.name} in your actors list is unchanged.`);
+      } else {
+        ui.notifications?.info(`Prone art set on this token: ${art}. (No actors-list entry to save it to.)`);
+      }
+      TokenArtPicker.close();
+    } catch (err) {
+      console.error(`${MID} | prone art apply failed:`, err);
+      ui.notifications?.error("Failed to set the prone art (see console).");
+    }
   }
 
   /**

@@ -116,6 +116,74 @@ export async function rebuildPortraitIndex({ silent = false } = {}) {
     return { fileCount: _portraits.all.length, folders: folders.length };
 }
 
+// ─── Prone index (its own folders, its own purpose) ──────────────────────────
+// Johnny, 2026-09-02: "I want you to build a prone art thing, the same as
+// portrait art and token art, under the token art module."
+//
+// ⚠️ A THIRD KIND, NOT A FILTER OVER THE OTHER TWO. A standing top-down token
+// makes a useless prone image and a portrait makes a worse one, so this is a
+// separate walk over separate folders, exactly like portraits. Offering the
+// wrong kind silently is worse than an empty tab that says which folder to set.
+//
+// ⚠️ IT DEFAULTS TO THE FOLDER THE ART IS ALREADY IN. ace-qol's prone swapper
+// has been reading `modules/ace-qol/Assets/Prone` since 2026-08-11 and Johnny
+// has seven files in there. Shipping this with an empty folder list would have
+// presented an empty tab to a man who already owns the art.
+const _prone = {
+    /** All entries, in scan order: {path, fullName, fullLower, file} */
+    all: [],
+    ready: false,
+};
+
+export function getProneIndex() { return _prone; }
+
+/** (Re)build the prone index from `tokenArtProneFolders`. */
+export async function rebuildProneIndex({ silent = false } = {}) {
+    const folders = (() => {
+        try {
+            const raw = game.settings.get(MODULE_ID, "tokenArtProneFolders");
+            return Array.isArray(raw) ? raw.filter(Boolean) : [];
+        } catch (_) { return []; }
+    })();
+
+    _prone.all = [];
+    _prone.ready = false;
+
+    if (!folders.length) {
+        _prone.ready = true;
+        console.log(`${TAG} | No prone folders configured — prone index empty.`);
+        return { fileCount: 0, folders: 0 };
+    }
+
+    const t0 = performance.now();
+    let paths = [];
+    try { paths = await _scanFolders(folders); }
+    catch (err) { console.warn(`${TAG} | Prone scan failed:`, err?.message ?? err); }
+
+    const seen = new Set();
+    for (const p of paths) {
+        if (seen.has(p)) continue;
+        seen.add(p);
+        const file = decodeURIComponent(String(p).split("/").pop() ?? "");
+        // ⚠️ THE `prone-` PREFIX IS A FILING CONVENTION, NOT PART OF THE NAME.
+        // Leaving it on makes every card in the grid read "Prone Firaxis" and
+        // makes a search for "firaxis" score worse than it should.
+        const bare = file.replace(/\.[^.]+$/, "").replace(/^prone[-_ ]*/i, "");
+        const full = _normalizeFilename(bare) || bare;
+        _prone.all.push({ path: p, file, fullName: full, fullLower: full.toLowerCase() });
+    }
+    _prone.all.sort((a, b) => a.fullLower.localeCompare(b.fullLower));
+    _prone.ready = true;
+
+    const ms = Math.round(performance.now() - t0);
+    console.log(`${TAG} | Prone index: ${_prone.all.length} image(s) across ${folders.length} folder(s) in ${ms}ms.`);
+    if (!silent) {
+        try { ui.notifications?.info(`ACE: Token Art — ${_prone.all.length.toLocaleString()} prone images indexed.`); }
+        catch (_) { /* non-fatal */ }
+    }
+    return { fileCount: _prone.all.length, folders: folders.length };
+}
+
 // Active chooser DOM element — tracked so we can dismiss the previous one
 // before a new spawn pops a new chooser on top of it.
 let _activeChooser = null;
@@ -1809,6 +1877,13 @@ export function activateTokenArtEngine() {
     // only needs them when its Portrait tab is opened.
     rebuildPortraitIndex({ silent: true })
         .catch(err => console.warn(`${TAG} | Initial portrait index build failed:`, err));
+
+    // Prone art the same way. ⚠️ IT HAS TO BE BUILT AT BOOT, not lazily on the
+    // tab, because ace-qol asks this index for a creature's prone picture the
+    // moment something is knocked down — which can happen before anybody has
+    // ever opened the picker.
+    rebuildProneIndex({ silent: true })
+        .catch(err => console.warn(`${TAG} | Initial prone index build failed:`, err));
 
     Hooks.on("createToken", _onTokenCreated);
 
