@@ -13,6 +13,7 @@ import {
     rebuildTokenArtIndex,
     getTokenArtIndex,
     rebuildPortraitIndex,
+    matchMissingArt,
     getProneIndex,
     rebuildProneIndex,
     getPortraitIndex,
@@ -796,6 +797,15 @@ Hooks.once("ready", async () => {
                     path:     e.path,
                 }));
             },
+
+            /**
+             * Give art to every creature that has none.
+             *
+             * ⚠️ DRY RUN BY DEFAULT. It reports what it would do and writes
+             * nothing until asked, because it can touch several hundred actors
+             * in one press and there is no undo for that.
+             */
+            matchMissingArt: (opts) => matchMissingArt(opts),
 
             // ── Prone (separate folders, separate index) ──
             getProneIndex,

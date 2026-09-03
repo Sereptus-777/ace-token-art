@@ -1843,6 +1843,117 @@ export async function pickTokenArtForActor(actor) {
     }
 }
 
+/**
+ * Give art to every creature that has none.
+ *
+ * Johnny, 2026-09-03: he imported two monster packs and 740 of his 2511 actors
+ * arrived with NO image at all — actor image null, prototype token null. That
+ * is not only ugly: Foundry's sidebar drag reads the row's thumbnail and calls
+ * `.src` on it without a null check, so a row with no image THROWS on drag
+ * start and the creature cannot be dragged onto the canvas at all.
+ *
+ * ⚠️ THE SAME MATCHER THE CHOOSER USES, NOT A SECOND ONE. `_findMatches` knows
+ * about noise in stat block names, creature families and taxonomic folders, and
+ * it took a long time to get right. A bulk pass with its own quick-and-dirty
+ * name compare would disagree with the chooser on hundreds of creatures and
+ * nobody would be able to say which was correct.
+ *
+ * ⚠️ IT ONLY TOUCHES WHAT IT IS SURE OF. One clear best match gets applied.
+ * Anything with no match is left exactly as it is and NAMED in the report, so
+ * "it did nothing for these" is a list he can act on rather than a silence.
+ *
+ * ⚠️ AND IT NEVER OVERWRITES ART HE ALREADY HAS. Only actors whose image is
+ * missing, or is Foundry's mystery-man placeholder, are considered.
+ *
+ *   game.modules.get("ace-token-art").api.matchMissingArt()              dry run
+ *   game.modules.get("ace-token-art").api.matchMissingArt({apply: true}) do it
+ *
+ * @param {object}  [opts]
+ * @param {boolean} [opts.apply=false]  write the changes; otherwise report only
+ * @param {boolean} [opts.includePCs=false]  player characters are skipped by
+ *        default — they have art chosen by hand and a bulk pass must not
+ *        silently repaint somebody's character.
+ */
+export async function matchMissingArt({ apply = false, includePCs = false } = {}) {
+    if (!game.user.isGM) {
+        ui.notifications?.warn("Only the GM can set token art.");
+        return null;
+    }
+
+    if (!_index.ready) {
+        ui.notifications?.info("ACE Token Art: building the art index…");
+        await rebuildTokenArtIndex({ silent: true });
+    }
+    if (!_index.all?.length) {
+        // ⚠️ "NO ART INDEXED" AND "NO MATCHES FOUND" ARE DIFFERENT ANSWERS and
+        // must never print the same. An empty index means the folders are
+        // wrong, not that his creatures are unusual.
+        ui.notifications?.error("ACE Token Art: the art index is empty, so nothing can be matched. "
+            + "Check your Token Art Folders and rescan.");
+        return null;
+    }
+
+    const PLACEHOLDER = /mystery-man|^icons\/svg\/item-bag\.svg$/i;
+    const needsArt = (a) => {
+        const img = String(a.img ?? "");
+        const tok = String(a.prototypeToken?.texture?.src ?? "");
+        return !img || !tok || PLACEHOLDER.test(img) || PLACEHOLDER.test(tok);
+    };
+
+    const targets = game.actors.filter(a => {
+        if (!needsArt(a)) return false;
+        if (!includePCs && (a.type === "character" || a.hasPlayerOwner)) return false;
+        return true;
+    });
+
+    const matched = [];
+    const unmatched = [];
+
+    for (const actor of targets) {
+        try {
+            // Species first, so a renamed creature still finds its own art —
+            // the same precedence the chooser and the auto-matcher both use.
+            let searchName = "";
+            try { searchName = String(game.aceQol?.speciesOf?.(actor)?.name ?? "").trim(); } catch (_) { /* qol absent */ }
+            if (!searchName) searchName = String(actor.name ?? "").trim();
+
+            const { matches } = _findMatches(searchName);
+            if (!matches?.length) { unmatched.push(actor.name); continue; }
+            matched.push({ id: actor.id, name: actor.name, path: matches[0].path });
+        } catch (err) {
+            console.warn(`${TAG} | could not match art for "${actor?.name}":`, err);
+            unmatched.push(actor?.name ?? "(unnamed)");
+        }
+    }
+
+    console.log(`${TAG} | ${targets.length} actor(s) without art. `
+        + `${matched.length} matched, ${unmatched.length} with nothing in your folders.`);
+    if (unmatched.length) {
+        console.log(`${TAG} | no art found for: ${unmatched.sort().join(", ")}`);
+    }
+
+    if (!apply) {
+        ui.notifications?.info(`ACE Token Art: ${matched.length} of ${targets.length} can be matched. `
+            + `Nothing changed — pass {apply: true} to write them.`);
+        return { targets: targets.length, matched, unmatched, applied: false };
+    }
+
+    // ⚠️ IN BATCHES, AND BOTH FIELDS. The sidebar row reads `img`; the token on
+    // the map reads `prototypeToken.texture.src`. Setting only one leaves the
+    // creature draggable but faceless, or vice versa, and the drag bug comes
+    // straight back.
+    const updates = matched.map(m => ({
+        _id: m.id, img: m.path, "prototypeToken.texture.src": m.path,
+    }));
+    for (let i = 0; i < updates.length; i += 100) {
+        await Actor.updateDocuments(updates.slice(i, i + 100), { aceTokenArtRepair: true });
+    }
+
+    ui.notifications?.info(`ACE Token Art: art set on ${matched.length} creature(s). `
+        + `${unmatched.length} had nothing in your folders — their names are in the console.`);
+    return { targets: targets.length, matched, unmatched, applied: true };
+}
+
 export function activateTokenArtEngine() {
     if (_activated) return Promise.resolve();
     if (!game.user.isGM) return Promise.resolve();
