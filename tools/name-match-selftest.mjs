@@ -20,7 +20,7 @@ globalThis.foundry = { utils: { escapeHTML: (s) => String(s) },
   applications: { apps: {} } };
 globalThis.canvas = { grid: { size: 100 } };
 
-const { _containsWordRun } = await import(
+const { _containsWordRun, _containsAllWords } = await import(
   "file:///D:/FoundryVTT/Data/modules/ace-token-art/scripts/token-art-engine.mjs");
 
 let pass = 0, fail = 0;
@@ -74,6 +74,39 @@ console.log("\nNOTHING SILLY GETS THROUGH");
 check("an empty needle matches nothing", _containsWordRun("anything", []), false);
 check("an empty haystack matches nothing", finds("", "Goblin"), false);
 check("a null haystack matches nothing", _containsWordRun(null, ["goblin"]), false);
+
+
+console.log("\nHIS SWARMS — filed backwards, which the in-order test cannot see");
+// ⚠️ REAL FILENAMES OFF HIS DISK. The stat block says "Swarm of Beetles"; the
+// library says "Insect_Swarm_Beetles". Same words, reversed.
+const words = (n) => n.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+  .filter(w => !["of","the","a","an","and"].includes(w))
+  .map(w => w.length > 3 && w.endsWith("ies") ? w.slice(0,-3)+"y"
+          : w.length > 3 && w.endsWith("es") && !w.endsWith("ses") ? w.slice(0,-2)
+          : w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0,-1) : w);
+const all = (file, creature) => _containsAllWords(file, words(creature));
+
+check("Swarm of Beetles finds Insect_Swarm_Beetles",
+  all("67293_Insect_Swarm_Beetles_Medium_Beast_400x400", "Swarm of Beetles"), true);
+check("Swarm of Wasps finds Insect_Swarm_Wasps",
+  all("67290_Insect_Swarm_Wasps_Medium_Beast_400x400", "Swarm of Wasps"), true);
+check("Swarm of Centipedes finds Insect_Swarm_Centipedes",
+  all("67294_Insect_Swarm_Centipedes_Medium_Beast_400x400", "Swarm of Centipedes"), true);
+check("plural and singular are the same word",
+  all("67287_Insect_Swarm_Mix_A_Medium_Beast", "Swarm of Insects"), true);
+check("Swarm of Rats finds its own file",
+  all("28971_Swarm_of_Rats_Medium_Beast_01_400x400", "Swarm of Rats"), true);
+
+console.log("\nAND IT STILL REFUSES THE WRONG SWARM");
+// ⚠️ THE WHOLE SAFETY OF THIS STEP. Every word must be present.
+check("Swarm of Beetles does NOT take Swarm of Rats",
+  all("28971_Swarm_of_Rats_Medium_Beast_01_400x400", "Swarm of Beetles"), false);
+check("Swarm of Venomous Snakes does NOT take Poisonous Snakes",
+  all("87432_Swarm_of_Poisonous_Snakes_Tiny_Beast_01", "Swarm of Venomous Snakes"), false);
+check("Swarm of Piranhas does NOT take Swarm of Quippers",
+  all("28969_Swarm_of_Quippers_Medium_Beast_01", "Swarm of Piranhas"), false);
+check("a creature does not match on stop words alone",
+  all("Some_of_the_Other_Thing", "Swarm of Insects"), false);
 
 console.log("");
 console.log(pass + " passed, " + fail + " failed");

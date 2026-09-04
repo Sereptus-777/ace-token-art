@@ -892,6 +892,54 @@ function _stripActorNameNoise(lower) {
  * finding Piranha in "2024-mm2024-piranha" and finding Roc in
  * "Crocodile_Large_Beast_01".
  */
+/**
+ * Words that carry no identity and must not be required to match.
+ *
+ * ⚠️ SHORT AND CERTAIN. Every word added here is a word two different creatures
+ * are allowed to disagree about, so the list stays to grammar rather than
+ * anything descriptive.
+ */
+const _NAME_STOPWORDS = new Set(["of", "the", "a", "an", "and"]);
+
+/** Crude singular: "insects" and "insect" have to be the same word. */
+function _stem(word) {
+    if (word.length > 3 && word.endsWith("ies")) return word.slice(0, -3) + "y";
+    if (word.length > 3 && word.endsWith("es") && !word.endsWith("ses")) return word.slice(0, -2);
+    if (word.length > 3 && word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+    return word;
+}
+
+function _significantWords(name) {
+    return String(name ?? "").toLowerCase().split(/[^a-z0-9]+/)
+        .filter(Boolean).filter(w => !_NAME_STOPWORDS.has(w)).map(_stem);
+}
+
+/**
+ * Does this file's name contain every meaningful word of the creature's,
+ * in any order?
+ *
+ * ⚠️🔴 HIS LIBRARY NAMES THEM BACKWARDS. "Swarm of Beetles" is filed as
+ * `Insect_Swarm_Beetles_Medium_Beast.png`, "Swarm of Wasps" as
+ * `Insect_Swarm_Wasps`. The words are all there and the order is not, so the
+ * in-order test found none of the 93 swarm files he owns (2026-09-03).
+ *
+ * ⚠️ EVERY WORD, NOT SOME. Requiring all of them is what keeps this honest:
+ * "Swarm of Beetles" cannot land on "Swarm of Rats" because `beetles` is
+ * missing, and "Swarm of Venomous Snakes" correctly does NOT match
+ * `Swarm_of_Poisonous_Snakes`, which is a different creature wearing a similar
+ * name. Anything looser starts handing him confident wrong answers.
+ *
+ * ⚠️ AND STOP WORDS DO NOT COUNT. "of" appears in half his filenames; requiring
+ * it would be requiring nothing.
+ */
+export function _containsAllWords(haystack, needleWords) {
+    if (!haystack || !needleWords?.length) return false;
+    const have = new Set(_significantWords(haystack));
+    if (!have.size) return false;
+    for (const w of needleWords) if (!have.has(w)) return false;
+    return true;
+}
+
 export function _containsWordRun(haystack, needleTokens) {
     if (!haystack || !needleTokens?.length) return false;
     const h = String(haystack).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
@@ -1047,7 +1095,27 @@ function _findMatches(actorName) {
         );
     }
 
-    if (substringHits.length || speciesHits.length || containsHits.length) {
+    // 5d. EVERY WORD PRESENT, IN ANY ORDER.
+    //
+    // ⚠️ THE ORDER IN A FILENAME IS THE LIBRARIAN'S, NOT THE BOOK'S. His swarms
+    // are filed as `Insect_Swarm_Beetles` while the stat block calls them
+    // "Swarm of Beetles" — same words, reversed, and step 5c above requires
+    // them contiguous and in order, so it found none of his 93 swarm files.
+    //
+    // ⚠️ ALL OF THE WORDS, WHICH IS WHAT MAKES IT SAFE. "Swarm of Beetles"
+    // cannot land on "Swarm of Rats", because `beetles` is missing. Loosening
+    // this to "most of the words" would start producing confident wrong art,
+    // which is worse than the mystery man he asked for.
+    let anyOrderHits = [];
+    if (!containsHits.length) {
+        const needWords = _significantWords(lower);
+        if (needWords.length) {
+            anyOrderHits = _index.all.filter(e =>
+                _containsAllWords(`${e.fullLower ?? ""} ${e.baseLower ?? ""}`, needWords));
+        }
+    }
+
+    if (substringHits.length || speciesHits.length || containsHits.length || anyOrderHits.length) {
         const seenPaths = new Set();
         const merged = [];
         for (const e of substringHits) {
@@ -1059,10 +1127,14 @@ function _findMatches(actorName) {
         for (const e of containsHits) {
             if (!seenPaths.has(e.path)) { seenPaths.add(e.path); merged.push(e); }
         }
+        for (const e of anyOrderHits) {
+            if (!seenPaths.has(e.path)) { seenPaths.add(e.path); merged.push(e); }
+        }
         const reasonParts = [];
         if (substringHits.length) reasonParts.push("substring");
         if (speciesHits.length)   reasonParts.push(`species:${creatureToken}`);
         if (containsHits.length)  reasonParts.push("named-inside");
+        if (anyOrderHits.length)  reasonParts.push("all-words");
         return {
             matches: _preferFamilyFolder(merged, actorFamily),
             reason: reasonParts.join("+"),
