@@ -883,6 +883,29 @@ function _stripActorNameNoise(lower) {
  * Find candidate art for an actor by name.
  * Returns { matches: Entry[], reason: "exact" | "base" | "stripped" | "key" | "substring" | "none" }
  */
+/**
+ * Does `haystack` contain every word of `needleTokens`, in order, as whole words?
+ *
+ * ⚠️🔴 WORD RUNS, NOT `includes`. "Roc" is inside "Crocodile". A plain
+ * substring test would have handed Johnny's Roc a crocodile and looked like a
+ * match while doing it. Whole words in sequence is the difference between
+ * finding Piranha in "2024-mm2024-piranha" and finding Roc in
+ * "Crocodile_Large_Beast_01".
+ */
+export function _containsWordRun(haystack, needleTokens) {
+    if (!haystack || !needleTokens?.length) return false;
+    const h = String(haystack).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    if (h.length < needleTokens.length) return false;
+    outer:
+    for (let i = 0; i + needleTokens.length <= h.length; i++) {
+        for (let j = 0; j < needleTokens.length; j++) {
+            if (h[i + j] !== needleTokens[j]) continue outer;
+        }
+        return true;
+    }
+    return false;
+}
+
 function _findMatches(actorName) {
     const rawLower = (actorName || "").toLowerCase().trim();
     if (!rawLower) return { matches: [], reason: "none" };
@@ -998,7 +1021,33 @@ function _findMatches(actorName) {
 
     // Merge step-5 substring + step-5b species, dedup by path. Substring
     // matches rank first (more specific), species matches second.
-    if (substringHits.length || speciesHits.length) {
+    // 5c. THE FILE NAMES THE CREATURE SOMEWHERE IN THE MIDDLE.
+    //
+    // ⚠️🔴 EVERY STEP ABOVE LOOKS FOR A FILE THE ACTOR'S NAME STARTS WITH, OR
+    // A FILE NAME THE ACTOR'S NAME CONTAINS. None of them look for the actor's
+    // name INSIDE the filename, and that is where real libraries keep it:
+    //
+    //   Piranha       ->  2024-mm2024-piranha.jpeg
+    //   Pteranodon    ->  114606_Pteranodon_Large_Scale200_Beast_01.png
+    //   Gynosphinx    ->  Gynosphinx_Large_Scale200_Monstrosity_A_01.png
+    //   Will-o'-Wisp  ->  Will-o-Wisp_Tiny_Undead_01.png
+    //
+    // Johnny, 2026-09-03: 69 creatures reported as having no art in his folders
+    // while the art sat on his disk in both folders he had just added. The
+    // library was never the problem.
+    //
+    // ⚠️ LAST, AND ONLY WHEN EVERYTHING ELSE FAILED, so it can never outrank a
+    // prefix or key hit. This is the step that fills the gap rather than one
+    // that competes.
+    const nameTokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
+    let containsHits = [];
+    if (nameTokens.length && lower.replace(/[^a-z0-9]/g, "").length >= 4) {
+        containsHits = _index.all.filter(e =>
+            _containsWordRun(e.fullLower, nameTokens) || _containsWordRun(e.baseLower, nameTokens)
+        );
+    }
+
+    if (substringHits.length || speciesHits.length || containsHits.length) {
         const seenPaths = new Set();
         const merged = [];
         for (const e of substringHits) {
@@ -1007,9 +1056,13 @@ function _findMatches(actorName) {
         for (const e of speciesHits) {
             if (!seenPaths.has(e.path)) { seenPaths.add(e.path); merged.push(e); }
         }
+        for (const e of containsHits) {
+            if (!seenPaths.has(e.path)) { seenPaths.add(e.path); merged.push(e); }
+        }
         const reasonParts = [];
         if (substringHits.length) reasonParts.push("substring");
         if (speciesHits.length)   reasonParts.push(`species:${creatureToken}`);
+        if (containsHits.length)  reasonParts.push("named-inside");
         return {
             matches: _preferFamilyFolder(merged, actorFamily),
             reason: reasonParts.join("+"),
@@ -1873,8 +1926,16 @@ export async function pickTokenArtForActor(actor) {
  * @param {boolean} [opts.includePCs=false]  player characters are skipped by
  *        default — they have art chosen by hand and a bulk pass must not
  *        silently repaint somebody's character.
+ * @param {boolean} [opts.placeholder=false]  give the mystery man to whatever
+ *        could not be matched.
+ *
+ * ⚠️ THE PLACEHOLDER IS NOT COSMETIC, IT IS WHAT MAKES THE CREATURE USABLE.
+ * Foundry's sidebar drag reads the row's thumbnail and calls `.src` on it with
+ * no null check, so an actor with no image at all THROWS on drag start and
+ * cannot be put on the map. The mystery man is the difference between a
+ * creature he has not got art for yet and a creature he cannot use.
  */
-export async function matchMissingArt({ apply = false, includePCs = false } = {}) {
+export async function matchMissingArt({ apply = false, includePCs = false, placeholder = false } = {}) {
     if (!game.user.isGM) {
         ui.notifications?.warn("Only the GM can set token art.");
         return null;
@@ -1949,9 +2010,35 @@ export async function matchMissingArt({ apply = false, includePCs = false } = {}
         await Actor.updateDocuments(updates.slice(i, i + 100), { aceTokenArtRepair: true });
     }
 
-    ui.notifications?.info(`ACE Token Art: art set on ${matched.length} creature(s). `
-        + `${unmatched.length} had nothing in your folders — their names are in the console.`);
-    return { targets: targets.length, matched, unmatched, applied: true };
+    // ⚠️ THE UNMATCHED STILL NEED AN IMAGE, OR THEY CANNOT BE DRAGGED AT ALL.
+    // Johnny, 2026-09-03: "just give me the mystery man for the rest of them,
+    // and I'll get to them when I can." Two of his packs ship spell effects and
+    // NPC templates — Arcane Sword, Carpet of Flying, Tough Boss — that no
+    // creature library will ever match, and a handful of 2024 creatures whose
+    // only art was in a folder he does not want to use.
+    let placeheld = 0;
+    if (placeholder && unmatched.length) {
+        const MYSTERY = "icons/svg/mystery-man.svg";
+        const byName = new Map();
+        for (const a of targets) if (!byName.has(a.name)) byName.set(a.name, []);
+        for (const a of targets) byName.get(a.name)?.push(a);
+        const matchedIds = new Set(matched.map(m => m.id));
+        const rest = targets.filter(a => !matchedIds.has(a.id));
+        const fill = rest.map(a => ({
+            _id: a.id,
+            img: a.img || MYSTERY,
+            "prototypeToken.texture.src": a.prototypeToken?.texture?.src || MYSTERY,
+        }));
+        for (let i = 0; i < fill.length; i += 100) {
+            await Actor.updateDocuments(fill.slice(i, i + 100), { aceTokenArtRepair: true });
+        }
+        placeheld = fill.length;
+    }
+
+    ui.notifications?.info(`ACE Token Art: art set on ${matched.length} creature(s).`
+        + (placeheld ? ` ${placeheld} given the mystery man so they can be dragged.` : "")
+        + (unmatched.length ? ` Names of the unmatched are in the console.` : ""));
+    return { targets: targets.length, matched, unmatched, placeheld, applied: true };
 }
 
 export function activateTokenArtEngine() {
