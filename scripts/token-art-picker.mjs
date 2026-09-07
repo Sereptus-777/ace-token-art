@@ -716,7 +716,7 @@ ${dir}`;
       const saveDefault = opts.saveDefault !== false;
       await tokenDoc.update({ "texture.src": entry.path });
       // Keep the slow auto-bio art flow from overwriting this manual pick later.
-      try { await tokenDoc.actor?.setFlag(MID, "skipAutoArt", true); } catch (_) {}
+      try { await tokenDoc.actor?.setFlag(MID, "skipAutoArt", true); } catch (err) { console.warn(`ace-token-art | a setFlag did not save:`, err); }
 
       const art = entry.fullName || entry.displayVariant || "art";
       let savedTo = null;

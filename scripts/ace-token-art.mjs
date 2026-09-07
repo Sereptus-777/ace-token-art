@@ -56,7 +56,7 @@ async function _migrateLegacySettings() {
             // defaults in place.
         }
     }
-    try { await game.settings.set(MODULE_ID, "migratedFromAceEngine", true); } catch (_) {}
+    try { await game.settings.set(MODULE_ID, "migratedFromAceEngine", true); } catch (err) { console.warn(`ace-token-art | a set did not save:`, err); }
     if (migratedCount) {
         console.log(`${MODULE_ID} | Migrated ${migratedCount} setting(s) from ace-engine.`);
     }

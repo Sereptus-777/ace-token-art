@@ -1316,7 +1316,7 @@ async function _setRecentChoice(actorName, path) {
     if (!key) return;
     const recent = _getRecentChoices();
     recent[key] = path;
-    try { await game.settings.set(MODULE_ID, "tokenArtRecentChoices", recent); } catch (_) {}
+    try { await game.settings.set(MODULE_ID, "tokenArtRecentChoices", recent); } catch (err) { console.warn(`ace-token-art | a set did not save:`, err); }
 }
 
 // ─── Token swap (also handles auto-rename if enabled) ──────────────────────
