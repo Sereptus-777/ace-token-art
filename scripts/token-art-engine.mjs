@@ -1372,6 +1372,12 @@ function _dismissActiveChooser() {
     if (_activeChooser?.parentNode) {
         try { _activeChooser.parentNode.removeChild(_activeChooser); } catch (_) {}
     }
+    // ⚠️ A CHOOSER TAKEN OFF THE SCREEN MUST STILL ANSWER. Dropping a second
+    // token removes the first chooser's box, and its promise used to sit there
+    // forever: the drop that opened it never finished, so that token kept its art
+    // by accident and nothing ever said so. It now answers "keep what it has",
+    // which is the same outcome, out loud, and the drop completes.
+    try { _activeChooser?.aceKeepOriginal?.("another chooser opened"); } catch (_) {}
     _activeChooser = null;
 }
 
@@ -1448,7 +1454,33 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
         const truncNote = truncated
             ? ` <span class="ace-tap-hint" style="color:#d4af37;">(showing top ${matches.length} of ${totalCount})</span>`
             : "";
-        header.innerHTML = `<i class="fas fa-image"></i> <strong>${actorName ?? "Token"}</strong> — pick variant${truncNote} <span class="ace-tap-hint">(click • Enter • 1-9 • R random • Esc)</span>`;
+        header.innerHTML = `<i class="fas fa-image"></i> <strong>${actorName ?? "Token"}</strong> — pick variant${truncNote} <span class="ace-tap-hint">(click • Enter • 1-9 • R random)</span>`;
+
+        // ⚠️🔴 KEEPING THE ART IT ARRIVED WITH WAS NOT ON OFFER. Johnny,
+        // 2026-09-16: "When I drop a token, it's given me different art to pick
+        // from, but it doesn't allow me to keep the original art. I need a great
+        // big pill button right across the top." Every way out of this box used to
+        // apply a picture: a click, Enter, a number, R, Escape and even clicking
+        // outside all resolved to the highlighted variant. A token dropped with the
+        // art he wanted could not keep it.
+        //
+        // So the first thing in the box, across the whole width, is the way out
+        // that changes nothing. It shows the art it would be keeping, because "keep
+        // original" means nothing next to a picture you cannot see.
+        const keepBtn = document.createElement("button");
+        keepBtn.type = "button";
+        keepBtn.className = "ace-tap-keep";
+        const currentSrc = tokenDoc?.texture?.src ?? "";
+        keepBtn.innerHTML = `
+            ${currentSrc ? `<img class="ace-tap-keep-img" src="${currentSrc}" alt="">` : ""}
+            <span class="ace-tap-keep-text">Keep original art</span>
+            <span class="ace-tap-keep-key">Esc</span>`;
+        keepBtn.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            keepOriginal("the Keep original art button");
+        });
+        root.appendChild(keepBtn);
         root.appendChild(header);
 
         // Derive a useful label per match: prefer explicit displayVariant;
@@ -1518,7 +1550,8 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
         // (click / Enter / 1-9 / R / Escape). No auto-pick.
         const updateFooter = () => {
             const variantLabel = labelFor(matches[highlightIdx] ?? {});
-            footer.textContent = `Highlighted: "${variantLabel}" — click or press Enter to use, R for random, Esc/click-outside to accept highlight.`;
+            footer.textContent = `Highlighted: "${variantLabel}" — click or press Enter to use it, R for random. `
+                + `Keep original art, Escape or a click outside leaves the token exactly as it is.`;
         };
 
         const finish = (entry) => {
@@ -1527,6 +1560,21 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
             cleanup();
             resolve(entry ?? matches[highlightIdx] ?? matches[0] ?? null);
         };
+
+        /**
+         * Leave the token exactly as it was dropped.
+         *
+         * ⚠️ NULL IS THE ANSWER, AND BOTH CALLERS ALREADY READ IT. `finish(null)`
+         * would fall through to the highlighted variant, which is the whole bug.
+         */
+        const keepOriginal = (why = "kept") => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            console.log(`${TAG} | "${actorName ?? "token"}" keeps the art it was dropped with (${why}).`);
+            resolve(null);
+        };
+        root.aceKeepOriginal = keepOriginal;
 
         const cleanup = () => {
             // v0.7.21: tickId/setInterval removed — no countdown timer to clear.
@@ -1537,7 +1585,11 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
 
         const onKey = (e) => {
             if (e.key === "Enter")            { e.preventDefault(); e.stopPropagation(); finish(matches[highlightIdx]); }
-            else if (e.key === "Escape")      { e.preventDefault(); e.stopPropagation(); finish(matches[highlightIdx]); }
+            // ⚠️ ESCAPE MEANS "CHANGE NOTHING", EVERYWHERE ELSE IN THE WORLD. It
+            // used to apply the highlighted variant, which is a picture landing on
+            // a token from the key people press to back out (2026-09-16).
+            else if (e.key === "Escape")      { e.preventDefault(); e.stopPropagation(); keepOriginal("Escape"); }
+            else if (e.key.toLowerCase() === "k") { e.preventDefault(); e.stopPropagation(); keepOriginal("K"); }
             else if (e.key.toLowerCase() === "r") {
                 e.preventDefault(); e.stopPropagation();
                 const random = matches[Math.floor(Math.random() * matches.length)];
@@ -1562,7 +1614,8 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
         document.addEventListener("keydown", onKey, true);
 
         const onOutsideClick = (e) => {
-            if (!root.contains(e.target)) finish(matches[highlightIdx]);
+            // Clicking the map to get on with the fight is not a choice of art.
+            if (!root.contains(e.target)) keepOriginal("a click outside the box");
         };
         document.addEventListener("mousedown", onOutsideClick, true);
 
