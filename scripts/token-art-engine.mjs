@@ -600,8 +600,9 @@ async function _scanFolders(rootPaths) {
  * @param {object} [opts]
  * @param {boolean} [opts.useCache=true] — load from `worlds/<id>/ace-token-art/index-cache.json` when configured folders match
  * @param {boolean} [opts.silent=false]  — suppress the "scanning…" toast (used by background reloads)
+ * @param {boolean} [opts.cacheOnly=false] — load the saved index if it fits and stop there; never walk the folders
  */
-export async function rebuildTokenArtIndex({ useCache = true, silent = false } = {}) {
+export async function rebuildTokenArtIndex({ useCache = true, silent = false, cacheOnly = false } = {}) {
     const folders = (() => {
         try {
             const raw = game.settings.get(MODULE_ID, "tokenArtFolders");
@@ -624,10 +625,15 @@ export async function rebuildTokenArtIndex({ useCache = true, silent = false } =
                     try { ui.notifications?.info?.(`ACE: Token Art — loaded ${cache.entries.length.toLocaleString()} entries from cache (instant). Rescan Folders to pick up new art.`); }
                     catch (_) { /* non-fatal */ }
                 }
+                _announceIndexReady(true);
                 return { fileCount: cache.entries.length, baseCount: _index.byBase.size, fromCache: true };
             }
             console.log(`${TAG} | Cache folder list differs from current setting — full rescan needed.`);
         }
+    }
+    if (cacheOnly) {
+        console.log(`${TAG} | No saved index fits the current folders, so nothing is shown until they are read.`);
+        return { fileCount: _index.all.length, baseCount: _index.byBase.size, fromCache: false, noCache: true };
     }
 
     if (!folders.length) {
@@ -790,6 +796,7 @@ export async function rebuildTokenArtIndex({ useCache = true, silent = false } =
     _index.byKey = byKey;
     _index.all = all;
     _index.ready = true;
+    _announceIndexReady(false);
 
     const ms = (performance.now() - t0).toFixed(0);
     console.log(`${TAG} | Index built in ${ms}ms — ${all.length} files, ${byBase.size} unique base names, ${byKey.size} key signatures, ${creatureFolderCount} creature folders, ${binFolderCount} category folders.`);
@@ -817,6 +824,17 @@ export async function rebuildTokenArtIndex({ useCache = true, silent = false } =
 
 /** Get the live index (for settings UI / debugging). */
 export function getTokenArtIndex() { return _index; }
+
+/**
+ * Say the index has just been (re)built, so an open picker can fill in. The
+ * picker is the only listener today; a name nobody fires would wait forever,
+ * so the name lives here beside the one place that fires it.
+ */
+export const INDEX_READY_HOOK = "aceTokenArtIndexReady";
+function _announceIndexReady(fromCache) {
+    try { Hooks.callAll(INDEX_READY_HOOK, { fileCount: _index.all.length, fromCache }); }
+    catch (err) { console.warn(`${TAG} | could not tell an open picker the index is ready:`, err); }
+}
 
 // ─── Matching ──────────────────────────────────────────────────────────────
 
@@ -2189,7 +2207,26 @@ export function activateTokenArtEngine() {
 
     console.log(`${TAG} | Startup index build — ${_rescanOnStartup ? "FULL RESCAN (reading folders from disk)" : "using saved cache (rescan on startup is OFF)"}`);
 
-    const buildPromise = rebuildTokenArtIndex({ useCache: !_rescanOnStartup, silent: true })
+    // ⚠️🔴 THE PICKER WAITED FOR THE WHOLE LIBRARY (his table, 2026-09-18: "Build
+    // and show page 1 first. Do not scan the whole library before those 20
+    // appear."). With the startup rescan on, the index stayed EMPTY until every
+    // one of his ~1,280 folders had been read, so a picker opened in that time
+    // had nothing to show, while a saved index of all 26,000 files sat unread
+    // in the world folder. The saved index goes in first, in about a second;
+    // the folders are read again behind it and swapped in when done, so new
+    // art still turns up.
+    const buildPromise = (async () => {
+        if (!_rescanOnStartup) return rebuildTokenArtIndex({ useCache: true, silent: true });
+        try {
+            const quick = await rebuildTokenArtIndex({ useCache: true, cacheOnly: true, silent: true });
+            if (quick?.fromCache) {
+                console.log(`${TAG} | Using the saved index (${quick.fileCount} files) while the folders are read again.`);
+            }
+        } catch (err) {
+            console.warn(`${TAG} | The saved index could not be loaded first; the folders are read now:`, err);
+        }
+        return rebuildTokenArtIndex({ useCache: false, silent: true });
+    })()
         .then(res => {
             console.log(`${TAG} | Startup index ready — ${res?.fileCount ?? 0} files, ${res?.baseCount ?? 0} creatures${res?.fromCache ? " (from cache)" : " (fresh scan)"}.`);
             return res;

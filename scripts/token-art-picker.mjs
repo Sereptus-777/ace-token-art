@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MID = "ace-token-art";
-const PICKER_BUILD = "1.1.0";   // shown in the header — if you don't see this number, the new file isn't loading
+const PICKER_BUILD = "1.2.0";   // shown in the header — if you don't see this number, the new file isn't loading
 
 function _api() { return game.modules.get(MID)?.api ?? null; }
 
@@ -58,6 +58,36 @@ function _queryArt(name) {
     } catch (_) {}
   }
   return entries;
+}
+
+/** Thumbnails per page. Johnny, 2026-09-18: "20 thumbnails per page, not 10." */
+export const PER_PAGE = 20;
+
+/**
+ * The first `n` pieces of token art whose name holds the query, in index order,
+ * stopping the moment it has them.
+ *
+ * ⚠️ PAGE 1 BEFORE THE REST (his table, 2026-09-18: "Build and show page 1
+ * first. Do not scan the whole library before those 20 appear."). The full
+ * search reads every one of his ~26,000 entries before anything is drawn; this
+ * reads only as far as the twentieth match. Same test and same order as the
+ * API's own search, so page 1 does not change when the full count arrives.
+ *
+ * @param {{all: object[]}} index  the token-art index
+ * @returns {object[]} index entries
+ */
+export function firstMatches(index, query, n = PER_PAGE) {
+  const all = Array.isArray(index?.all) ? index.all : [];
+  const q = String(query ?? "").toLowerCase().trim();
+  if (!q) return all.slice(0, n);
+  const out = [];
+  for (const e of all) {
+    if (String(e?.baseLower ?? "").includes(q) || String(e?.fullLower ?? "").includes(q)) {
+      out.push(e);
+      if (out.length >= n) break;
+    }
+  }
+  return out;
 }
 
 /**
@@ -257,7 +287,7 @@ export class TokenArtPicker {
         // token, so it has to follow the tab.
         try { TokenArtPicker._syncDefaultsText?.(); } catch (_) {}
         search.placeholder = KINDS[id].placeholder;
-        paint(_run(search.value));
+        paintQuery(search.value);
       });
       tabs.appendChild(t);
       return t;
@@ -341,9 +371,14 @@ export class TokenArtPicker {
     // six. This is a picker used mid-session, with players connected, to change
     // a token RIGHT NOW. Fifteen seconds to become usable means it does not get
     // used at all.
-    const PER_PAGE = 10;
+    //
+    // ⚠️ AND TWENTY IS HIS NUMBER NOW (2026-09-18: "20 thumbnails per page, not
+    // 10"). The loader below still fills them in reading order, two at a time,
+    // and a page he never turns to never downloads anything.
     let _list = [];
     let _page = 0;
+    let _counting = false;     // page 1 is up; the full count is still coming
+    let _queryGen = 0;         // a newer search or tab replaces an older count
 
     // Set styles with !important so NO external module CSS (BG3 HUD, portrait tweaks,
     // Foundry core img rules, etc.) can override our cell dimensions or force
@@ -505,15 +540,18 @@ ${dir}`;
       for (let i = 0; i < LANES; i++) startOne();
     };
 
-    const renderPage = () => {
+    // The index is not built yet (the very first read of his folders, with no
+    // saved index to start from): say so, and fill in the moment it is.
+    const _indexReady = () => _mode !== "token" || _api()?.getTokenArtIndex?.()?.ready !== false;
+
+    const renderCards = () => {
       grid.innerHTML = "";
-      footer.innerHTML = "";
       if (!_list.length) {
         const empty = document.createElement("div");
         Object.assign(empty.style, { gridColumn: "1/-1", textAlign: "center", color: "#9c8a64", padding: "44px", fontSize: "16px" });
-        empty.textContent = KINDS[_mode].empty;
+        empty.textContent = _indexReady() ? KINDS[_mode].empty
+          : "Reading your art folders. The pictures appear here as soon as they are read.";
         grid.appendChild(empty);
-        footer.textContent = "0 results";
         return;
       }
       const pages = Math.max(1, Math.ceil(_list.length / PER_PAGE));
@@ -522,23 +560,32 @@ ${dir}`;
       for (const entry of _list.slice(start, start + PER_PAGE)) grid.appendChild(_card(entry));
       try { grid.scrollTop = 0; } catch (_) {}
       _fillImages(grid);
+    };
 
+    const renderFooter = () => {
+      footer.innerHTML = "";
+      if (!_list.length) { footer.textContent = _indexReady() ? "0 results" : "Reading your art folders…"; return; }
+      const pages = Math.max(1, Math.ceil(_list.length / PER_PAGE));
+      const start = _page * PER_PAGE;
       // Footer: result range on the left, pager on the right.
       const count = document.createElement("div");
       count.style.color = "#9c8a64";
-      count.textContent = `${_list.length} result${_list.length === 1 ? "" : "s"} — showing ${start + 1}–${Math.min(_list.length, start + PER_PAGE)}. Click to apply (sticks on this token, even unlinked).`;
+      count.textContent = _counting
+        ? `Showing 1–${_list.length}, counting the rest… Click to apply (sticks on this token, even unlinked).`
+        : `${_list.length} result${_list.length === 1 ? "" : "s"} — showing ${start + 1}–${Math.min(_list.length, start + PER_PAGE)}. Click to apply (sticks on this token, even unlinked).`;
       footer.appendChild(count);
       const nav = document.createElement("div");
       Object.assign(nav.style, { marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px", flex: "0 0 auto" });
-      nav.appendChild(_navBtn("‹ Prev", _page <= 0, () => { _page--; renderPage(); }));
+      nav.appendChild(_navBtn("‹ Prev", _counting || _page <= 0, () => { _page--; renderCards(); renderFooter(); }));
       const ind = document.createElement("div");
       Object.assign(ind.style, { fontSize: "13px", color: "#c9b48a", minWidth: "92px", textAlign: "center" });
-      ind.textContent = `Page ${_page + 1} / ${pages}`;
+      ind.textContent = _counting ? "Page 1 / …" : `Page ${_page + 1} / ${pages}`;
       nav.appendChild(ind);
-      nav.appendChild(_navBtn("Next ›", _page >= pages - 1, () => { _page++; renderPage(); }));
+      nav.appendChild(_navBtn("Next ›", _counting || _page >= pages - 1, () => { _page++; renderCards(); renderFooter(); }));
       footer.appendChild(nav);
     };
 
+    const renderPage = () => { renderCards(); renderFooter(); };
 
     const paint = (list) => {
       _list = Array.isArray(list) ? list : [];
@@ -546,10 +593,36 @@ ${dir}`;
       renderPage();
     };
 
+    // Page 1 from the first twenty matches, then the full count on the next
+    // turn of the event loop: the cards on screen are not redrawn when it lands,
+    // so page 1's pictures keep downloading. Portraits and prone art rank their
+    // matches, so they need the whole list first; their indexes are small.
+    const paintQuery = (q) => {
+      const gen = ++_queryGen;
+      _counting = false;
+      if (_mode === "token") {
+        const first = firstMatches(_api()?.getTokenArtIndex?.(), q, PER_PAGE);
+        if (first.length) {
+          _counting = true;
+          paint(first);
+          setTimeout(() => {
+            if (gen !== _queryGen || !TokenArtPicker._el) return;
+            let all = [];
+            try { all = _run(q); } catch (err) { console.warn(`${MID} | the picker could not count the rest:`, err); all = first; }
+            _counting = false;
+            _list = Array.isArray(all) && all.length ? all : first;
+            renderFooter();
+          }, 0);
+          return;
+        }
+      }
+      paint(_run(q));
+    };
+
     let timer = null;
     search.addEventListener("input", () => {
       clearTimeout(timer);
-      timer = setTimeout(() => paint(_run(search.value)), 180);
+      timer = setTimeout(() => paintQuery(search.value), 180);
     });
 
     // ── Draggable by the header (grab + move like a normal window) ──
@@ -596,7 +669,17 @@ ${dir}`;
     try { search.focus(); } catch (_) {}
 
     syncTabs();
-    paint(_run(query));
+    paintQuery(query);
+
+    // Still reading the folders for the first time: fill in when they are read.
+    if (!_indexReady()) {
+      const hook = _api()?.indexReadyHook ?? "aceTokenArtIndexReady";
+      const id = Hooks.on(hook, () => {
+        Hooks.off(hook, id);
+        if (TokenArtPicker._el !== backdrop) return;
+        paintQuery(search.value);
+      });
+    }
   }
 
   /**

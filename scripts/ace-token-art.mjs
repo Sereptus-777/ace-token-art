@@ -18,6 +18,7 @@ import {
     rebuildProneIndex,
     getPortraitIndex,
     auditAndRepairTokenPaths,
+    INDEX_READY_HOOK,
 } from "./token-art-engine.mjs";
 
 export const MODULE_ID = "ace-token-art";
@@ -777,6 +778,8 @@ Hooks.once("ready", async () => {
             },
             /** Inspect the current in-memory index (for debugging). */
             getTokenArtIndex,
+            /** The hook fired each time the token-art index is (re)built; the picker listens while it waits. */
+            indexReadyHook: INDEX_READY_HOOK,
             /**
              * Re-run the path-integrity / self-heal pass on demand (repairs
              * broken art paths across actors + the current scene). Returns
