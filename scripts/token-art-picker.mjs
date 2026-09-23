@@ -341,25 +341,32 @@ export class TokenArtPicker {
     if (opts.keepOriginal) {
       keepBar = document.createElement("div");
       Object.assign(keepBar.style, {
+        flex: "0 0 auto",   // never squeezed by the art grid below it
         padding: "12px 16px", borderBottom: "1px solid #4a3a28",
         background: "linear-gradient(180deg,#191309,#12100c)",
       });
       const keep = document.createElement("button");
       keep.type = "button";
-      keep.innerHTML = `<i class="fas fa-check" style="font-size:18px;"></i>
-        <span style="font-size:18px;font-weight:700;letter-spacing:.3px;">Keep Original Art</span>
-        <span style="font-size:14px;font-weight:500;color:#6b5a34;">Escape, or click outside, does the same</span>`;
+      // Green ground, brighter yellow lettering, and every word outlined in a
+      // dark green so it reads against it (his screenshot, 2026-09-23: "I can't
+      // see it"). The stroke goes on the button, so the icon and both lines get
+      // it — there is no word in here that is allowed to disappear.
+      keep.innerHTML = `<i class="fas fa-check" style="font-size:20px;"></i>
+        <span style="font-size:19px;font-weight:800;letter-spacing:.4px;">Keep Original Art</span>
+        <span style="font-size:15px;font-weight:600;opacity:.92;">Escape, or click outside, does the same</span>`;
+      const KEEP_BG = "linear-gradient(180deg,#1f8a45,#116030)";
+      const KEEP_BG_HOVER = "linear-gradient(180deg,#2aa957,#177a3d)";
       Object.assign(keep.style, {
-        width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: "12px",
-        flexWrap: "wrap", textAlign: "center",
-        padding: "14px 18px", borderRadius: "999px", cursor: "pointer",
-        border: "2px solid #d4af37", background: "linear-gradient(180deg,#2a2114,#1a1509)",
-        color: "#f0d98a", fontFamily: "inherit",
+        width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: "14px",
+        flexWrap: "wrap", textAlign: "center", lineHeight: "1.35",
+        padding: "16px 20px", borderRadius: "999px", cursor: "pointer",
+        border: "2px solid #ffe14d", background: KEEP_BG,
+        color: "#ffe75a", fontFamily: "inherit",
+        WebkitTextStroke: "0.6px #063b1c",
+        textShadow: "0 0 3px #063b1c, 0 1px 0 #063b1c, 1px 0 0 #063b1c, -1px 0 0 #063b1c, 0 -1px 0 #063b1c",
       });
-      keep.addEventListener("mouseenter", () => { keep.style.background = "#d4af37"; keep.style.color = "#15110d"; });
-      keep.addEventListener("mouseleave", () => {
-        keep.style.background = "linear-gradient(180deg,#2a2114,#1a1509)"; keep.style.color = "#f0d98a";
-      });
+      keep.addEventListener("mouseenter", () => { keep.style.background = KEEP_BG_HOVER; });
+      keep.addEventListener("mouseleave", () => { keep.style.background = KEEP_BG; });
       keep.addEventListener("click", () => {
         console.log(`${MID} | ${tokenDoc.name}: kept the art it dropped with.`);
         TokenArtPicker.close();
