@@ -191,14 +191,24 @@ export class TokenArtPicker {
     TokenArtPicker.open(tk.document ?? tk);
   }
 
-  static open(tokenLike) {
+  /**
+   * @param {object} tokenLike  a Token or TokenDocument
+   * @param {object} [opts]
+   * @param {boolean} [opts.keepOriginal]  show the "Keep Original Art" pill at
+   *   the top. The HUD button never passes this, so the HUD window is exactly
+   *   what it was; a token drop does, because a drop arrives WITH art and
+   *   "leave it alone" has to be as easy as picking something.
+   * @param {(entry:object)=>void} [opts.onApplied]  told what was applied, for
+   *   a caller that keeps its own record of the GM's choices.
+   */
+  static open(tokenLike, opts = {}) {
     try {
       if (!game.user?.isGM) { ui.notifications?.warn("Token Art picker is GM-only."); return; }
       const tokenDoc = tokenLike?.document ?? tokenLike;
       if (!tokenDoc?.update) { ui.notifications?.warn("No token to pick art for."); return; }
       TokenArtPicker.close();
       const baseName = tokenDoc.actor?.name ?? tokenDoc.name ?? "";
-      TokenArtPicker._render(tokenDoc, baseName);
+      TokenArtPicker._render(tokenDoc, baseName, opts);
     } catch (err) { console.error(`${MID} | picker open failed:`, err); }
   }
 
@@ -212,7 +222,7 @@ export class TokenArtPicker {
     if (ev.key === "Escape") { ev.preventDefault(); TokenArtPicker.close(); }
   }
 
-  static _render(tokenDoc, query) {
+  static _render(tokenDoc, query, opts = {}) {
     // Which tab is live. Declared FIRST so every handler below closes over an
     // already-initialised binding — no temporal-dead-zone surprises.
     // ⚠️ A TERNARY IS NOT A THIRD TAB. Every "portrait or else" in this file
@@ -318,6 +328,44 @@ export class TokenArtPicker {
     });
     closeBtn.addEventListener("click", () => TokenArtPicker.close());
     header.appendChild(closeBtn);
+
+    // ── "Keep Original Art" ────────────────────────────────────────────
+    // ⚠️ ONLY ON A DROP (2026-09-23). The HUD button opens this window on a
+    // token already sitting on the map, and he opened it to change something.
+    // A drop is the other way round: the token arrived with art, and the most
+    // likely answer is "that one is fine". So the drop gets a pill that says so
+    // in as many pixels as the choice deserves, and Escape and a click on the
+    // backdrop are the same answer — the window only ever writes art when a
+    // picture is clicked, so closing it leaves the dropped art exactly as it is.
+    let keepBar = null;
+    if (opts.keepOriginal) {
+      keepBar = document.createElement("div");
+      Object.assign(keepBar.style, {
+        padding: "12px 16px", borderBottom: "1px solid #4a3a28",
+        background: "linear-gradient(180deg,#191309,#12100c)",
+      });
+      const keep = document.createElement("button");
+      keep.type = "button";
+      keep.innerHTML = `<i class="fas fa-check" style="font-size:18px;"></i>
+        <span style="font-size:18px;font-weight:700;letter-spacing:.3px;">Keep Original Art</span>
+        <span style="font-size:14px;font-weight:500;color:#6b5a34;">Escape, or click outside, does the same</span>`;
+      Object.assign(keep.style, {
+        width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: "12px",
+        flexWrap: "wrap", textAlign: "center",
+        padding: "14px 18px", borderRadius: "999px", cursor: "pointer",
+        border: "2px solid #d4af37", background: "linear-gradient(180deg,#2a2114,#1a1509)",
+        color: "#f0d98a", fontFamily: "inherit",
+      });
+      keep.addEventListener("mouseenter", () => { keep.style.background = "#d4af37"; keep.style.color = "#15110d"; });
+      keep.addEventListener("mouseleave", () => {
+        keep.style.background = "linear-gradient(180deg,#2a2114,#1a1509)"; keep.style.color = "#f0d98a";
+      });
+      keep.addEventListener("click", () => {
+        console.log(`${MID} | ${tokenDoc.name}: kept the art it dropped with.`);
+        TokenArtPicker.close();
+      });
+      keepBar.appendChild(keep);
+    }
 
     // ── Grid (big thumbnails) ──
     const grid = document.createElement("div");
@@ -458,11 +506,16 @@ ${dir}`;
       card.appendChild(imgWrap); card.appendChild(lbl);
       card.addEventListener("mouseenter", () => { card.style.borderColor = "#d4af37"; card.style.transform = "translateY(-2px)"; });
       card.addEventListener("mouseleave", () => { card.style.borderColor = "transparent"; card.style.transform = "none"; });
-      card.addEventListener("click", () => {
+      card.addEventListener("click", async () => {
         const saveDefault = document.getElementById("ace-ta-save-default")?.checked !== false;
         if (_mode === "portrait") return TokenArtPicker._applyPortrait(tokenDoc, entry, { saveDefault });
         if (_mode === "prone")    return TokenArtPicker._applyProne(tokenDoc, entry, { saveDefault });
-        return TokenArtPicker._apply(tokenDoc, entry, { saveDefault });
+        const applied = await TokenArtPicker._apply(tokenDoc, entry, { saveDefault });
+        // A caller that keeps its own record of what he picked is told. Token
+        // art only: a portrait is not an answer to "what does this creature
+        // look like on the map".
+        try { opts.onApplied?.(entry); } catch (err) { console.warn(`${MID} | onApplied threw (non-fatal):`, err); }
+        return applied;
       });
       return card;
     };
@@ -659,6 +712,7 @@ ${dir}`;
     TokenArtPicker._syncDefaultsText = syncDefaultsText;
 
     panel.appendChild(header);
+    if (keepBar) panel.appendChild(keepBar);   // directly under the header, above the art
     panel.appendChild(grid);
     panel.appendChild(defaultsBar);
     panel.appendChild(footer);

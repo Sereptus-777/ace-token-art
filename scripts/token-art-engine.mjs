@@ -25,6 +25,10 @@
 import { MODULE_ID } from "./ace-token-art.mjs";
 
 import { tokenNameFromArt } from "./art-descriptor.mjs";
+// The picker the HUD button opens. Same window on a drop, by his call
+// (2026-09-23) — it has the search, the paging and the size; the old chooser
+// had a list. The picker imports nothing, so this cannot close a cycle.
+import { TokenArtPicker } from "./token-art-picker.mjs";
 
 const TAG = "ACE: Token Art";
 const IMG_EXT_RE = /\.(webp|png|jpg|jpeg|svg|gif|avif)$/i;
@@ -1952,18 +1956,30 @@ async function _onTokenCreated(tokenDoc, options, userId) {
         return;
     }
 
-    // Show chooser (handles 1+ matches)
-    const chosen = await _showChooser(tokenDoc, matches, { actorName: actor.name });
-    if (!chosen) return;
-    // Only suggest a rename if the chosen variant differs from the actor's
-    // current name (e.g. actor "Goblin" picks "Archer" → "Goblin Archer";
-    // actor "Goblin Archer" already exact-matched and never reached here).
-    const renameSuffix = chosen.displayVariant && !tokenDoc.name.toLowerCase().includes(chosen.variantLower)
-        ? chosen.displayVariant
-        : null;
-    console.log(`${TAG} | Applied via chooser → ${chosen.path}`);
-    await _applyArt(tokenDoc, chosen, { renameSuffix });
-    await _setRecentChoice(actor.name, chosen.path);
+    // ── ⚠️ THE SAME WINDOW HIS HUD BUTTON OPENS (his call, 2026-09-23) ──
+    //
+    // The old chooser was a list of the matches this file found. The picker is
+    // the one he actually uses: every folder, a search box, paging, portraits
+    // and prone art on their own tabs, at a size he can see. A drop gets that,
+    // with one control the HUD does not need — "Keep Original Art" — because a
+    // dropped token already HAS art and leaving it alone must be one press.
+    //
+    // Escape and a click outside are the same answer as that pill: the picker
+    // writes art only when a picture is clicked.
+    //
+    // The matches above still decide whether to open anything at all, so a
+    // creature with no art in any folder still gets the toast and no window.
+    console.log(`${TAG} | "${actor.name}" — opening the token art picker (${matches.length} match(es) found).`);
+    TokenArtPicker.open(tokenDoc, {
+        keepOriginal: true,
+        // Keep this file's memory of what he chose for a creature of this name,
+        // which is what ranks the matches for the next one. The old chooser did
+        // it on the way out; the picker applies the art itself, so it says so.
+        onApplied: (entry) => {
+            _setRecentChoice(actor.name, entry?.path)
+                .catch(err => console.warn(`${TAG} | could not record the choice for "${actor.name}":`, err));
+        },
+    });
 }
 
 // Throttle "no art" toasts to once per actor name per session so a swarm
