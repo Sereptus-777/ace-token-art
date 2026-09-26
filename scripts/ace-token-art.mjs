@@ -20,6 +20,7 @@ import {
     auditAndRepairTokenPaths,
     INDEX_READY_HOOK,
 } from "./token-art-engine.mjs";
+import { TokenScaleWrite } from "./token-scale-write.mjs";
 
 export const MODULE_ID = "ace-token-art";
 const LEGACY_MODULE_ID = "ace-engine";   // where these settings used to live
@@ -673,6 +674,10 @@ Hooks.once("init", () => {
     console.log(`${MODULE_ID} | init`);
     try { _registerSettings(); }
     catch (err) { console.warn(`${MODULE_ID} | Settings registration failed:`, err); }
+    // Registered at init, before ready has run, so the render hooks it adds are
+    // in place for the first token config or HUD of the session.
+    try { TokenScaleWrite.register(); }
+    catch (err) { console.warn(`${MODULE_ID} | Token scale write registration failed:`, err); }
 });
 
 Hooks.once("ready", async () => {
