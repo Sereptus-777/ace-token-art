@@ -15,6 +15,17 @@
 //    • Global: AceTokenArtPicker.openForControlled()   (macro-friendly)
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ⚠️🔴 ANIMATED TOKENS ARE TOKEN ART (2026-09-26). The scanner matched still
+// images only, so 201 .webm files sitting in his NPCs folder — whole packs of
+// animated tokens — were walked past on every scan and could never be picked.
+// Foundry takes a video as a token texture natively; ACE just never offered one.
+//
+// ⚠️ BOTH REGEXES LIVE HERE, TOGETHER, ON PURPOSE. If the scanner learned about
+// a format the picker did not, the tile would be a black square with no way to
+// tell it from a missing file. One place, or they drift.
+export const VIDEO_EXT_RE = /\.(webm|mp4|m4v|ogv)$/i;
+export const ART_EXT_RE   = /\.(webp|png|jpg|jpeg|svg|gif|avif|webm|mp4|m4v|ogv)$/i;
+
 const MID = "ace-token-art";
 const PICKER_BUILD = "1.2.0";   // shown in the header — if you don't see this number, the new file isn't loading
 
@@ -456,7 +467,19 @@ export class TokenArtPicker {
       const imgWrap = document.createElement("div");
       Object.assign(imgWrap.style, { background: "#000", display: "flex", alignItems: "center", justifyContent: "center" });
       _imp(imgWrap, { flex: "1 1 auto", minHeight: "0", width: "100%" });
-      const img = document.createElement("img");
+      // An <img> pointed at a .webm shows nothing and fires `error`, so an
+      // animated token would have been a black tile. Both kinds carry
+      // data-ace-src and both are filled by the same ordered loader below;
+      // only the tag and the ready event differ.
+      const isVideo = VIDEO_EXT_RE.test(entry.path);
+      const img = document.createElement(isVideo ? "video" : "img");
+      if (isVideo) {
+        img.muted       = true;
+        img.loop        = true;
+        img.autoplay    = true;
+        img.playsInline = true;
+        img.preload     = "metadata";
+      }
       // ⚠️ THE PATH IS PARKED, NOT ASSIGNED. Setting src here starts the fetch
       // for every tile at the same instant, so the browser runs six at once and
       // they arrive in whatever order the disk finishes them — the first tile,
@@ -564,7 +587,7 @@ ${dir}`;
     let _fillGeneration = 0;
     const _fillImages = (gridEl) => {
       const mine = ++_fillGeneration;
-      const pending = [...gridEl.querySelectorAll("img[data-ace-src]")];
+      const pending = [...gridEl.querySelectorAll("[data-ace-src]")];
       let next = 0;
 
       const startOne = () => {
@@ -591,9 +614,11 @@ ${dir}`;
             startOne();
         };
         const stall = setTimeout(advance, 6000);
-        img.addEventListener("load",  advance, { once: true });
-        img.addEventListener("error", advance, { once: true });
+        img.addEventListener("load",       advance, { once: true });
+        img.addEventListener("loadeddata", advance, { once: true });   // a video's "load"
+        img.addEventListener("error",      advance, { once: true });
         img.src = src;
+        if (img.tagName === "VIDEO") { try { img.play?.()?.catch?.(() => {}); } catch (_) {} }
       };
 
       const LANES = 2;

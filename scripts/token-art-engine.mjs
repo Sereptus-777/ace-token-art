@@ -28,10 +28,11 @@ import { tokenNameFromArt } from "./art-descriptor.mjs";
 // The picker the HUD button opens. Same window on a drop, by his call
 // (2026-09-23) — it has the search, the paging and the size; the old chooser
 // had a list. The picker imports nothing, so this cannot close a cycle.
-import { TokenArtPicker } from "./token-art-picker.mjs";
+import { TokenArtPicker, ART_EXT_RE } from "./token-art-picker.mjs";
 
 const TAG = "ACE: Token Art";
-const IMG_EXT_RE = /\.(webp|png|jpg|jpeg|svg|gif|avif)$/i;
+// What counts as token art lives in token-art-picker.mjs, beside the test for
+// which of them need a <video> to show. See the note there.
 const VARIANT_SEP = / - /;          // " - " — what splits base from variant
 // CHOOSER_TIMEOUT_MS removed v0.7.21 — chooser waits indefinitely for explicit pick.
 
@@ -579,7 +580,7 @@ async function _scanFolders(rootPaths) {
                 return;
             }
             for (const file of result.files ?? []) {
-                if (IMG_EXT_RE.test(file)) found.push(file);
+                if (ART_EXT_RE.test(file)) found.push(file);
             }
             for (const sub of result.dirs ?? []) next.push(sub);
         });
