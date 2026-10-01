@@ -20,7 +20,7 @@ globalThis.foundry = { utils: { escapeHTML: (s) => String(s) },
   applications: { apps: {} } };
 globalThis.canvas = { grid: { size: 100 } };
 
-const { _containsWordRun, _containsAllWords } = await import(
+const { _containsWordRun, _containsAllWords, _artWordsOf, _longestNameWord } = await import(
   "file:///D:/FoundryVTT/Data/modules/ace-token-art/scripts/token-art-engine.mjs");
 
 let pass = 0, fail = 0;
@@ -107,6 +107,39 @@ check("Swarm of Piranhas does NOT take Swarm of Quippers",
   all("28969_Swarm_of_Quippers_Medium_Beast_01", "Swarm of Piranhas"), false);
 check("a creature does not match on stop words alone",
   all("Some_of_the_Other_Thing", "Swarm of Insects"), false);
+
+/* == ONE WORD OF THE NAME IS THE WHOLE CREATURE ======================== */
+//
+// His rule, 2026-10-01: "It must not require the full sheet name. Split the name
+// into words. Ignore 'the', 'a', 'of', and any word under 3 letters. Match a
+// file if any remaining word equals the art name. 'Fred the Balor' matches
+// Balor. 'Virric Whatever' matches Virric. Longest matching word wins."
+//
+// Every step before this one wanted the WHOLE name, so a player character or a
+// named NPC — "Fred", "Whatever" — never gave the one word that names the
+// creature a chance on its own.
+console.log("");
+console.log("ONE WORD OF THE NAME");
+
+const artWords = (t) => _artWordsOf(t).join(" ");
+check("the stop words go", artWords("Fred the Balor"), "fred balor");
+check("and anything under three letters",
+  artWords("Ox of the Pit"), "pit");
+check("a size is not a name", artWords("Balor Huge Fiend 01"), "balor fiend");
+check("nor is a modifier word", artWords("Summoned Spectral Wolf"), "wolf");
+
+// Which word gets to decide.
+const library = (...names) => (w) => names.some(n => _artWordsOf(n).includes(w));
+check("Fred the Balor matches Balor",
+  _longestNameWord("Fred the Balor", library("Balor_Huge_Fiend_01")), "balor");
+check("Virric Whatever matches Virric",
+  _longestNameWord("Virric Whatever", library("Virric.webp")), "virric");
+check("the longest matching word wins",
+  _longestNameWord("Fred the Balor", library("Balor", "Red Dragon")), "balor");
+check("and a word nothing is named for does not decide",
+  _longestNameWord("Fred the Balor", library("Fiend")), null);
+check("a name with nothing to match on decides nothing",
+  _longestNameWord("Ox", library("Balor")), null);
 
 console.log("");
 console.log(pass + " passed, " + fail + " failed");

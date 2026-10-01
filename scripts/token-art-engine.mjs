@@ -977,6 +977,34 @@ export function _containsWordRun(haystack, needleTokens) {
     return false;
 }
 
+/**
+ * The words of a name that could name a picture: no stop words, nothing under
+ * three letters, no sizes, numbers or modifier words.
+ *
+ * ⚠️ Pure and exported so tools/name-match-selftest.mjs can hold the rule.
+ */
+export function _artWordsOf(text) {
+    return [...new Set(_significantWords(text))]
+        .filter(w => w.length >= 3 && !SIZE_TOKENS.has(w) && !STRIP_TOKENS.has(w)
+            && !NUMERIC_RE.test(w));
+}
+
+/**
+ * The longest word of a creature's name that names some art, or null.
+ *
+ * His rule, 2026-10-01: "Match a file if any remaining word equals the art name.
+ * 'Fred the Balor' matches Balor. 'Virric Whatever' matches Virric. Longest
+ * matching word wins."
+ *
+ * @param {string} name                the creature's name
+ * @param {(word: string) => boolean} hasWord  whether any file is named by it
+ */
+export function _longestNameWord(name, hasWord) {
+    const words = _artWordsOf(name).sort((a, b) => b.length - a.length || a.localeCompare(b));
+    for (const w of words) if (hasWord(w)) return w;
+    return null;
+}
+
 function _findMatches(actorName) {
     const rawLower = (actorName || "").toLowerCase().trim();
     if (!rawLower) return { matches: [], reason: "none" };
@@ -1118,6 +1146,42 @@ function _findMatches(actorName) {
         );
     }
 
+    // 5c-bis. ONE WORD OF THE NAME IS THE WHOLE CREATURE.
+    //
+    // ⚠️🔴 HIS RULE, 2026-10-01: "It must not require the full sheet name.
+    // Split the name into words. Ignore 'the', 'a', 'of', and any word under 3
+    // letters. Match a file if any remaining word equals the art name. 'Fred the
+    // Balor' matches Balor. 'Virric Whatever' matches Virric. Longest matching
+    // word wins."
+    //
+    // Every step above this one wants the WHOLE name: an exact file, a file the
+    // name starts with, the same word set, or a file holding all of the words.
+    // A player character or a named NPC has words nobody filed art under —
+    // "Fred", "Whatever" — so the one word that names the creature never got a
+    // chance on its own.
+    //
+    // ⚠️ WHOLE WORDS, NEVER A SUBSTRING. This file already carries the scar:
+    // "Roc" is inside "Crocodile", and a substring test handed his Roc a
+    // crocodile and looked like a match doing it. The file's own words are read
+    // the same way the creature's are, with sizes, numbers and modifier words
+    // ("Huge", "01", "Summoned") dropped so none of them can be the match.
+    //
+    // ⚠️ AND THE LONGEST WORD WINS, which is what keeps it honest when two
+    // words both hit: a longer word is a more particular word. "Balor" decides
+    // it, not "red" inside "Fred".
+    const anyWordHits = [];
+    let anyWordWord = null;
+    if (!containsHits.length) {
+        const named = (e, word) =>
+            _artWordsOf(`${e.fullLower ?? ""} ${e.baseLower ?? ""}`).includes(word);
+        anyWordWord = _longestNameWord(lower, (w) => _index.all.some(e => named(e, w)));
+        if (anyWordWord) anyWordHits.push(..._index.all.filter(e => named(e, anyWordWord)));
+        if (anyWordWord) {
+            console.log(`ace-token-art | "${actorName}" has no file of its own, and "${anyWordWord}" `
+                + `is the longest word of its name that names art: ${anyWordHits.length} file(s).`);
+        }
+    }
+
     // 5d. EVERY WORD PRESENT, IN ANY ORDER.
     //
     // ⚠️ THE ORDER IN A FILENAME IS THE LIBRARIAN'S, NOT THE BOOK'S. His swarms
@@ -1138,9 +1202,16 @@ function _findMatches(actorName) {
         }
     }
 
-    if (substringHits.length || speciesHits.length || containsHits.length || anyOrderHits.length) {
+    if (substringHits.length || speciesHits.length || containsHits.length || anyOrderHits.length
+        || anyWordHits.length) {
         const seenPaths = new Set();
         const merged = [];
+        // ⚠️ FIRST OF THE FALLBACKS. A word of the name matching a word of the
+        // filename is a stronger answer than a raw substring of either, which is
+        // the step below it.
+        for (const e of anyWordHits) {
+            if (!seenPaths.has(e.path)) { seenPaths.add(e.path); merged.push(e); }
+        }
         for (const e of substringHits) {
             if (!seenPaths.has(e.path)) { seenPaths.add(e.path); merged.push(e); }
         }
@@ -1154,6 +1225,7 @@ function _findMatches(actorName) {
             if (!seenPaths.has(e.path)) { seenPaths.add(e.path); merged.push(e); }
         }
         const reasonParts = [];
+        if (anyWordHits.length)   reasonParts.push(`name-word:${anyWordWord}`);
         if (substringHits.length) reasonParts.push("substring");
         if (speciesHits.length)   reasonParts.push(`species:${creatureToken}`);
         if (containsHits.length)  reasonParts.push("named-inside");
