@@ -20,7 +20,8 @@ globalThis.foundry = { utils: { escapeHTML: (s) => String(s) },
   applications: { apps: {} } };
 globalThis.canvas = { grid: { size: 100 } };
 
-const { _containsWordRun, _containsAllWords, _artWordsOf, _longestNameWord } = await import(
+const { _containsWordRun, _containsAllWords, _artWordsOf, _nameWordsOf,
+  _firstNameWordNamingArt } = await import(
   "file:///D:/FoundryVTT/Data/modules/ace-token-art/scripts/token-art-engine.mjs");
 
 let pass = 0, fail = 0;
@@ -108,38 +109,52 @@ check("Swarm of Piranhas does NOT take Swarm of Quippers",
 check("a creature does not match on stop words alone",
   all("Some_of_the_Other_Thing", "Swarm of Insects"), false);
 
-/* == ONE WORD OF THE NAME IS THE WHOLE CREATURE ======================== */
+/* == ONE WORD OF THE NAME IS THE WHOLE NAME OF A FILE ================== */
 //
-// His rule, 2026-10-01: "It must not require the full sheet name. Split the name
-// into words. Ignore 'the', 'a', 'of', and any word under 3 letters. Match a
-// file if any remaining word equals the art name. 'Fred the Balor' matches
-// Balor. 'Virric Whatever' matches Virric. Longest matching word wins."
+// His rule, 2026-10-01, in two parts. First: "It must not require the full sheet
+// name. Split the name into words. Ignore 'the', 'a', 'of'... Match a file if any
+// remaining word equals the art name."
 //
-// Every step before this one wanted the WHOLE name, so a player character or a
-// named NPC — "Fred", "Whatever" — never gave the one word that names the
-// creature a chance on its own.
+// Then, the same afternoon, the order: "The name's words, stop words out, are
+// tried in name order, not longest first. The first word that is the whole name
+// of a file wins. 'Virric Velikov' must take Virric, not a file named Velikov.
+// Dead and prone stay in their own bucket, so a dead Virric takes Virric Dead. A
+// word of two letters still counts when it is the whole file name."
+//
+// A person reads first-name-first: the first word is the one that is theirs, and
+// the surname is the family they came from. Longest-first had that backwards for
+// every character with two names.
 console.log("");
 console.log("ONE WORD OF THE NAME");
 
 const artWords = (t) => _artWordsOf(t).join(" ");
-check("the stop words go", artWords("Fred the Balor"), "fred balor");
-check("and anything under three letters",
-  artWords("Ox of the Pit"), "pit");
-check("a size is not a name", artWords("Balor Huge Fiend 01"), "balor fiend");
+check("the stop words go", _nameWordsOf("Fred the Balor").join(" "), "fred balor");
+check("and the name keeps its order", _nameWordsOf("Virric Velikov").join(" "), "virric velikov");
+check("a two-letter word is still one of them", _nameWordsOf("Ox of the Pit").join(" "), "ox pit");
+check("a size is not part of a file's name", artWords("Balor Huge Fiend 01"), "balor fiend");
 check("nor is a modifier word", artWords("Summoned Spectral Wolf"), "wolf");
+check("nor is the bucket: dead and prone are not a creature's name",
+  artWords("Virric Dead"), "virric");
+check("and prone the same", artWords("prone-virric"), "virric");
 
-// Which word gets to decide.
-const library = (...names) => (w) => names.some(n => _artWordsOf(n).includes(w));
-check("Fred the Balor matches Balor",
-  _longestNameWord("Fred the Balor", library("Balor_Huge_Fiend_01")), "balor");
-check("Virric Whatever matches Virric",
-  _longestNameWord("Virric Whatever", library("Virric.webp")), "virric");
-check("the longest matching word wins",
-  _longestNameWord("Fred the Balor", library("Balor", "Red Dragon")), "balor");
-check("and a word nothing is named for does not decide",
-  _longestNameWord("Fred the Balor", library("Fiend")), null);
-check("a name with nothing to match on decides nothing",
-  _longestNameWord("Ox", library("Balor")), null);
+// Which word decides, given a library.
+const whole = (...names) => (w) => names.some(n => {
+  const ws = _artWordsOf(n);
+  return ws.length === 1 && ws[0] === w;
+});
+check("Virric Velikov takes Virric, not Velikov",
+  _firstNameWordNamingArt("Virric Velikov", whole("Virric", "Velikov")), "virric");
+check("and a dead Virric takes Virric Dead",
+  _firstNameWordNamingArt("Virric Velikov", whole("Virric Dead.png")), "virric");
+check("Velikov only when nothing is named Virric",
+  _firstNameWordNamingArt("Virric Velikov", whole("Velikov")), "velikov");
+check("Fred the Balor takes Balor", _firstNameWordNamingArt("Fred the Balor", whole("Balor")), "balor");
+check("a two-letter word counts when it IS the file name",
+  _firstNameWordNamingArt("Ox", whole("Ox")), "ox");
+check("a word inside a longer filename is not the whole name",
+  _firstNameWordNamingArt("Fred the Balor", whole("Balor Huge Fiend 01")), null);
+check("and a word nothing is named for decides nothing",
+  _firstNameWordNamingArt("Fred the Balor", whole("Fiend")), null);
 
 console.log("");
 console.log(pass + " passed, " + fail + " failed");

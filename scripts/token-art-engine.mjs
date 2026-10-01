@@ -978,30 +978,60 @@ export function _containsWordRun(haystack, needleTokens) {
 }
 
 /**
- * The words of a name that could name a picture: no stop words, nothing under
- * three letters, no sizes, numbers or modifier words.
+ * What a file is actually named, as words: no stop words, no sizes, no numbers,
+ * no modifier words, and none of the words that say which BUCKET it is in.
+ *
+ * ⚠️ `dead` AND `prone` ARE NOT PART OF A FILE'S NAME HERE. His rule,
+ * 2026-10-01: "Dead and prone stay in their own bucket, so a dead Virric takes
+ * Virric Dead." So "Virric Dead.png" and "Virric.png" are both the whole name
+ * `virric`, and which bucket a file belongs to is decided by which folder it
+ * came from, never by the match.
+ *
+ * ⚠️ NOTHING IS DROPPED FOR BEING SHORT. That belongs to the creature's side of
+ * the comparison, and only there — see `_nameWordsOf`.
  *
  * ⚠️ Pure and exported so tools/name-match-selftest.mjs can hold the rule.
  */
+const _BUCKET_WORDS = new Set(["dead", "prone", "corpse"]);
+/** An image extension is not a word. The index strips it; a caller may not. */
+const _ART_EXT = /\.(png|webp|jpe?g|gif|avif|svg|webm|mp4|m4v|ogv)$/i;
 export function _artWordsOf(text) {
-    return [...new Set(_significantWords(text))]
-        .filter(w => w.length >= 3 && !SIZE_TOKENS.has(w) && !STRIP_TOKENS.has(w)
-            && !NUMERIC_RE.test(w));
+    return [...new Set(_significantWords(String(text ?? "").replace(_ART_EXT, "")))]
+        .filter(w => !SIZE_TOKENS.has(w) && !STRIP_TOKENS.has(w) && !NUMERIC_RE.test(w)
+            && !_BUCKET_WORDS.has(w));
 }
 
 /**
- * The longest word of a creature's name that names some art, or null.
+ * The words of a creature's NAME, in name order, stop words out.
  *
- * His rule, 2026-10-01: "Match a file if any remaining word equals the art name.
- * 'Fred the Balor' matches Balor. 'Virric Whatever' matches Virric. Longest
- * matching word wins."
- *
- * @param {string} name                the creature's name
- * @param {(word: string) => boolean} hasWord  whether any file is named by it
+ * ⚠️ IN NAME ORDER, NOT LONGEST FIRST (his rule, 2026-10-01: "The name's words,
+ * stop words out, are tried in name order, not longest first... 'Virric Velikov'
+ * must take Virric, not a file named Velikov"). A person reads
+ * first-name-first: the first word is the one that is theirs and the surname is
+ * the family they came from. Longest-first, which I shipped this morning, had
+ * that backwards for every character with two names.
  */
-export function _longestNameWord(name, hasWord) {
-    const words = _artWordsOf(name).sort((a, b) => b.length - a.length || a.localeCompare(b));
-    for (const w of words) if (hasWord(w)) return w;
+export function _nameWordsOf(name) {
+    return [...new Set(_significantWords(name))].filter(Boolean);
+}
+
+/**
+ * The first word of a creature's name that is the WHOLE name of some art, or
+ * null.
+ *
+ * His rule: "The first word that is the whole name of a file wins... A word of
+ * two letters still counts when it is the whole file name."
+ *
+ * ⚠️ TWO LETTERS COUNT HERE AND NOWHERE ELSE. A short word is dangerous as one
+ * word among several in a filename and not dangerous at all when it IS the
+ * filename: somebody named that picture that on purpose.
+ *
+ * @param {string} name  the creature's name
+ * @param {(word: string) => boolean} isWholeFileName  whether a file is named
+ *   exactly that and nothing else
+ */
+export function _firstNameWordNamingArt(name, isWholeFileName) {
+    for (const w of _nameWordsOf(name)) if (isWholeFileName(w)) return w;
     return null;
 }
 
@@ -1172,13 +1202,22 @@ function _findMatches(actorName) {
     const anyWordHits = [];
     let anyWordWord = null;
     if (!containsHits.length) {
-        const named = (e, word) =>
-            _artWordsOf(`${e.fullLower ?? ""} ${e.baseLower ?? ""}`).includes(word);
-        anyWordWord = _longestNameWord(lower, (w) => _index.all.some(e => named(e, w)));
-        if (anyWordWord) anyWordHits.push(..._index.all.filter(e => named(e, anyWordWord)));
+        // ⚠️ THE WHOLE NAME OF THE FILE, not a word somewhere inside it. "Virric
+        // Dead.png" is `virric`; "Balor_Huge_Fiend_01.png" is `balor fiend`, two
+        // words, so it is not the whole name of either and is left to the step
+        // below. His rule is about a picture somebody named after this creature.
+        const isWholeName = (e, word) => {
+            const w = _artWordsOf(e.baseLower ?? "");
+            if (w.length === 1 && w[0] === word) return true;
+            const f = _artWordsOf(e.fullLower ?? "");
+            return f.length === 1 && f[0] === word;
+        };
+        anyWordWord = _firstNameWordNamingArt(lower, (w) => _index.all.some(e => isWholeName(e, w)));
+        if (anyWordWord) anyWordHits.push(..._index.all.filter(e => isWholeName(e, anyWordWord)));
         if (anyWordWord) {
             console.log(`ace-token-art | "${actorName}" has no file of its own, and "${anyWordWord}" `
-                + `is the longest word of its name that names art: ${anyWordHits.length} file(s).`);
+                + `is the first word of its name that is the whole name of a file: `
+                + `${anyWordHits.length} file(s).`);
         }
     }
 
