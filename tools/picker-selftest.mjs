@@ -231,17 +231,90 @@ console.log("THE CURRENT PICTURE");
   check("and it is green, not gold",
     /background: "#5fd36a", color: "#0b1a0d",/.test(src)
     && /card\.style\.borderColor = "#5fd36a";/.test(src), true);
-  check("each tab answers its own question: texture, portrait, prone flag",
-    /if \(_mode === "portrait"\)/.test(src) && /if \(_mode === "prone"\)/.test(src)
-    && /same\(tokenDoc\?\.texture\?\.src\)/.test(src)
-    && /getFlag\?\.\("ace-qol", "proneArt"\)/.test(src), true);
-  check("a creature lying down still counts its standing art as current",
-    /same\(tokenDoc\?\.getFlag\?\.\("ace-qol", "proneArtPrevious"\)\)/.test(src), true);
   check("and hover never takes the green off",
     /if \(!_isCurrent\) card\.style\.borderColor = "#d4af37";/.test(src), true);
-  check("the paths are compared decoded, so %20 is not a different file",
-    /decodeURIComponent\(a\) === decodeURIComponent\(here\)/.test(src), true);
 }
+
+/* == THREE PICTURES, THREE MARKS, EACH ON ITS OWN TAB ===================== */
+//
+// His report, 2026-10-01: "The green Current mark shows on the token picture and
+// not on the portrait or the prone picture. The portrait tab marks the actor's
+// portrait. The prone tab marks the prone picture already assigned. Three
+// pictures, three marks, each on its own tab. A tab with no picture assigned
+// marks nothing."
+//
+// The old pins read the source for the shape of the test. They were green while
+// the test looked in the wrong place, which is the whole lesson: these call it.
+{
+  const P = TokenArtPicker;
+  const flagged = (flags) => ({
+    _f: flags, getFlag(scope, key) { return this._f?.[scope]?.[key]; },
+  });
+  const make = ({ worldImg = "", worldProne = "", ownImg = "", ownProne = "",
+                  tex = "", standing = "" } = {}) => {
+    const world = { ...flagged({ "ace-qol": { proneArt: worldProne } }), img: worldImg, name: "Virric" };
+    const own = { ...flagged({ "ace-qol": { proneArt: ownProne } }), img: ownImg };
+    game.actors.get = () => world;
+    return { actorId: "a1", actor: own, texture: { src: tex },
+      ...flagged({ "ace-qol": { proneArtPrevious: standing } }) };
+  };
+
+  const sheet = make({ worldImg: "Portraits/Virric.png", tex: "Tokens/Virric 33A.png",
+    worldProne: "Prone/Virric prone.png" });
+  check("the portrait tab marks the actor's portrait",
+    P._assignedArt("portrait", sheet) === "Portraits/Virric.png", P._assignedArt("portrait", sheet));
+  check("the prone tab marks the prone picture already assigned",
+    P._assignedArt("prone", sheet) === "Prone/Virric prone.png", P._assignedArt("prone", sheet));
+  check("the token tab marks the picture on the token",
+    P._assignedArt("token", sheet) === "Tokens/Virric 33A.png", P._assignedArt("token", sheet));
+  check("three tabs, three different answers from one token",
+    new Set(["portrait", "prone", "token"].map(m => P._assignedArt(m, sheet))).size === 3, "all three differ");
+
+  /* ⚠️🔴 THE BUG ITSELF. Both applies write to the token's own copy when
+     "save as default" is unticked, and the mark only read the world actor. */
+  const onlyHere = make({ worldImg: "Portraits/Default.png", ownImg: "Portraits/Virric.png",
+    worldProne: "Prone/Default.png", ownProne: "Prone/Virric prone.png" });
+  check("a portrait set on THIS TOKEN ONLY is the one marked",
+    P._assignedArt("portrait", onlyHere) === "Portraits/Virric.png", P._assignedArt("portrait", onlyHere));
+  check("and so is prone art set on this token only",
+    P._assignedArt("prone", onlyHere) === "Prone/Virric prone.png", P._assignedArt("prone", onlyHere));
+
+  /* ⚠️ A TAB WITH NOTHING ASSIGNED MARKS NOTHING. */
+  const empty = make({});
+  for (const m of ["portrait", "prone", "token"]) {
+    check(`the ${m} tab marks nothing when nothing is assigned`,
+      P._assignedArt(m, empty) === null, String(P._assignedArt(m, empty)));
+  }
+  check("and no card can match a tab with no picture",
+    P._samePath("Tokens/Virric.png", null) === false, "no mark");
+
+  /* ⚠️ ONE MARK PER TAB. A creature lying down is marked on its STANDING art;
+     the prone picture it is wearing belongs to the Prone tab. */
+  const down = make({ tex: "Prone/Virric prone.png", standing: "Tokens/Virric 33A.png" });
+  check("a creature lying down is marked on its standing art, and only that",
+    P._assignedArt("token", down) === "Tokens/Virric 33A.png"
+    && P._samePath("Prone/Virric prone.png", P._assignedArt("token", down)) === false,
+    P._assignedArt("token", down));
+
+  /* ⚠️ THE SAME FILE WRITTEN FOUR WAYS. */
+  check("%20 and a space are the same file",
+    P._samePath("Portraits/Virric%20A.png", "Portraits/Virric A.png"), true);
+  check("so are two spellings of the same case",
+    P._samePath("portraits/virric.png", "Portraits/VIRRIC.png"), true);
+  check("so is a Windows path and a leading slash",
+    P._samePath("Portraits\\Virric.png", "/Portraits/Virric.png"), true);
+  check("but two different files are not",
+    P._samePath("Portraits/Virric.png", "Portraits/Velikov.png") === false, true);
+
+  /* ⚠️ AND IT SAYS SO EITHER WAY (silence is a bug). */
+  const pickerSrc = readFileSync(
+    "D:/FoundryVTT/Data/modules/ace-token-art/scripts/token-art-picker.mjs", "utf8");
+  check("the tab says what it is using, found or not",
+    /NOT one of the/.test(pickerSrc) && /shown, `/.test(pickerSrc)
+    && /nothing is assigned, so nothing is marked/.test(pickerSrc), true);
+}
+
+
 
 console.log("");
 console.log(pass + " passed, " + fail + " failed");

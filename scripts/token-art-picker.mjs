@@ -27,7 +27,7 @@ export const VIDEO_EXT_RE = /\.(webm|mp4|m4v|ogv)$/i;
 export const ART_EXT_RE   = /\.(webp|png|jpg|jpeg|svg|gif|avif|webm|mp4|m4v|ogv)$/i;
 
 const MID = "ace-token-art";
-const PICKER_BUILD = "1.3.0";   // shown in the header — if you don't see this number, the new file isn't loading
+const PICKER_BUILD = "1.4.0";   // shown in the header — if you don't see this number, the new file isn't loading
 
 function _api() { return game.modules.get(MID)?.api ?? null; }
 
@@ -466,7 +466,7 @@ export class TokenArtPicker {
       }
     };
 
-    const _card = (entry) => {
+    const _card = (entry, assigned) => {
       const card = document.createElement("div");
       Object.assign(card.style, {
         cursor: "pointer", borderRadius: "8px", overflow: "hidden",
@@ -558,31 +558,19 @@ ${dir}`;
        * actor's portrait and the prone flag are three different pictures, so
        * "Current" in the Portrait tab means the portrait and nothing else. A
        * card marked current in one tab is an ordinary card in the next.
+       *
+       * ⚠️🔴 AND IT ONLY EVER SHOWED ON THE TOKEN TAB, 2026-10-01: "The
+       * green Current mark shows on the token picture and not on the portrait or
+       * the prone picture." The token tab reads `texture.src`, which lives ON the
+       * token and is always there. The other two read the WORLD actor — and both
+       * applies write to the token's own copy instead whenever "save as default"
+       * is unticked, which is the whole point of that box. The writer had two
+       * destinations and the reader looked at one of them.
+       *
+       * One reader for all three now, and it reads the token's own answer first
+       * because that is the picture this token is actually using.
        */
-      const _isCurrent = (() => {
-        try {
-          const here = String(entry.path ?? "");
-          if (!here) return false;
-          const same = (p) => {
-            const a = String(p ?? "");
-            if (!a) return false;
-            try { return decodeURIComponent(a) === decodeURIComponent(here); }
-            catch (_) { return a === here; }
-          };
-          if (_mode === "portrait") {
-            return same(TokenArtPicker._worldActorFor(tokenDoc)?.img ?? tokenDoc?.actor?.img);
-          }
-          if (_mode === "prone") {
-            const world = TokenArtPicker._worldActorFor(tokenDoc);
-            return same(world?.getFlag?.("ace-qol", "proneArt")
-              ?? tokenDoc?.actor?.getFlag?.("ace-qol", "proneArt"));
-          }
-          // The token on the map, and what it was wearing before it went prone:
-          // a creature lying down is still "using" its standing art.
-          return same(tokenDoc?.texture?.src)
-            || same(tokenDoc?.getFlag?.("ace-qol", "proneArtPrevious"));
-        } catch (_) { return false; }
-      })();
+      const _isCurrent = TokenArtPicker._samePath(entry.path, assigned);
       if (_isCurrent) {
         card.style.borderColor = "#5fd36a";
         card.style.boxShadow = "0 0 0 1px rgba(95,211,106,0.45), 0 0 12px rgba(95,211,106,0.30)";
@@ -721,7 +709,11 @@ ${dir}`;
       const pages = Math.max(1, Math.ceil(_list.length / PER_PAGE));
       _page = Math.min(Math.max(0, _page), pages - 1);
       const start = _page * PER_PAGE;
-      for (const entry of _list.slice(start, start + PER_PAGE)) grid.appendChild(_card(entry));
+      /* ⚠️ ASKED ONCE PER RENDER, NOT ONCE PER CARD. One tab, one picture in
+         use, so twenty cards comparing themselves against twenty fresh reads of
+         the same flag is twenty chances to disagree. */
+      const assigned = TokenArtPicker._assignedArt(_mode, tokenDoc);
+      for (const entry of _list.slice(start, start + PER_PAGE)) grid.appendChild(_card(entry, assigned));
       try { grid.scrollTop = 0; } catch (_) {}
       _fillImages(grid);
     };
@@ -751,10 +743,38 @@ ${dir}`;
 
     const renderPage = () => { renderCards(); renderFooter(); };
 
-    const paint = (list) => {
+    /* ⚠️🔴 SILENCE IS A BUG, AND THIS IS THE BUG THAT HID FOR A FORTNIGHT.
+       A tab with no green mark on it looks exactly the same whether nothing is
+       assigned, the assigned picture is in a folder this tab does not read, or
+       the reader is looking in the wrong place — which it was. One line per
+       list says which of the three it is, and names the path, so the next
+       report is an answer instead of a hunt. */
+    const _sayWhatIsInUse = () => {
+      const label = _mode === "portrait" ? "Portrait" : _mode === "prone" ? "Prone" : "Token Art";
+      try {
+        const assigned = TokenArtPicker._assignedArt(_mode, tokenDoc);
+        if (!assigned) {
+          console.log(`${MID} | the ${label} tab: nothing is assigned, so nothing is marked.`);
+          return;
+        }
+        const at = _list.findIndex(e => TokenArtPicker._samePath(e?.path, assigned));
+        console.log(at >= 0
+          ? `${MID} | the ${label} tab: in use "${assigned}" — marked, number ${at + 1} of ${_list.length} shown.`
+          : `${MID} | the ${label} tab: in use "${assigned}" — NOT one of the ${_list.length} shown, `
+            + `so no mark. That file is outside the folders this tab reads, or named something this search does not list.`);
+      } catch (err) {
+        console.warn(`${MID} | could not say which picture the ${label} tab is using:`, err);
+      }
+    };
+
+    const paint = (list, { partial = false } = {}) => {
       _list = Array.isArray(list) ? list : [];
       _page = 0;
       renderPage();
+      // ⚠️ NOT ON PAGE 1 OF A TOKEN SEARCH. That list is the first twenty of a
+      // scan still running, so "not one of the 20 shown" would be a false alarm
+      // about a picture sitting on page 3. The full list says it a moment later.
+      if (!partial) _sayWhatIsInUse();
     };
 
     // Page 1 from the first twenty matches, then the full count on the next
@@ -768,7 +788,7 @@ ${dir}`;
         const first = firstMatches(_api()?.getTokenArtIndex?.(), q, PER_PAGE);
         if (first.length) {
           _counting = true;
-          paint(first);
+          paint(first, { partial: true });
           setTimeout(() => {
             if (gen !== _queryGen || !TokenArtPicker._el) return;
             let all = [];
@@ -776,6 +796,7 @@ ${dir}`;
             _counting = false;
             _list = Array.isArray(all) && all.length ? all : first;
             renderFooter();
+            _sayWhatIsInUse();   // the whole list is in now, so the count is true
           }, 0);
           return;
         }
@@ -865,6 +886,76 @@ ${dir}`;
     if (!world) return null;
     if (world.pack) return null;      // compendium — never written to
     return world;
+  }
+
+  /**
+   * THE ONE PICTURE A TAB IS USING, or null when that tab has none.
+   *
+   * ⚠️🔴 ONE READER, BECAUSE THE WRITER HAS TWO DESTINATIONS. `_applyPortrait`
+   * and `_applyProne` both write to the WORLD actor when "save as default" is
+   * ticked and to the TOKEN'S OWN copy when it is not, and the mark only ever
+   * read the world actor — so a picture set on one token was never marked, and
+   * that is why only the token tab, which reads the token's own `texture.src`,
+   * ever showed the green (his report, 2026-10-01).
+   *
+   * The token's own answer comes first: a value in the token's delta is what
+   * THIS token is using, and the actors-list entry is what the next one will get.
+   *
+   * ⚠️ ONE ANSWER, NOT A LIST. His rule: "Three pictures, three marks, each on
+   * its own tab." Two green cards on one tab is not three marks, it is a tab
+   * that cannot make up its mind — so on the token tab a creature lying down is
+   * marked on its STANDING art and not also on the prone picture it is wearing,
+   * which is the Prone tab's business.
+   *
+   * ⚠️ A TAB WITH NOTHING ASSIGNED MARKS NOTHING (his rule, same message), so
+   * this returns null rather than guessing at the first card.
+   *
+   * @param {"token"|"portrait"|"prone"} mode  which tab is asking
+   * @param {TokenDocument} tokenDoc  the token the picker was opened on
+   * @returns {string|null} the art path in use for that tab
+   */
+  static _assignedArt(mode, tokenDoc) {
+    const first = (...vals) => {
+      for (const v of vals) { const str = String(v ?? "").trim(); if (str) return str; }
+      return null;
+    };
+    try {
+      const world = TokenArtPicker._worldActorFor(tokenDoc);
+      const own = tokenDoc?.actor ?? null;      // the token's own copy (its delta)
+      if (mode === "portrait") return first(own?.img, world?.img);
+      if (mode === "prone") {
+        return first(own?.getFlag?.("ace-qol", "proneArt"),
+                     world?.getFlag?.("ace-qol", "proneArt"));
+      }
+      // The token on the map, and what it was wearing before it went down: a
+      // creature lying down is still USING its standing art.
+      return first(tokenDoc?.getFlag?.("ace-qol", "proneArtPrevious"),
+                   tokenDoc?.texture?.src);
+    } catch (err) {
+      console.warn(`${MID} | could not read which ${mode} picture is in use, so none is marked:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Two paths naming the same file.
+   *
+   * ⚠️ NORMALISED ON BOTH SIDES OR IT NEVER MATCHES. A path reaches this from
+   * three places that each write it differently: the index walk, Foundry's file
+   * picker (which percent-encodes a space) and whatever was typed into a sheet.
+   * Decoded, forward slashes, no leading slash, and lower case because his
+   * library is mixed case ("VIRRIC Vaesoldandros") on a filesystem that is not.
+   */
+  static _samePath(a, b) {
+    const norm = (p) => {
+      let str = String(p ?? "").trim();
+      if (!str) return "";
+      try { str = decodeURIComponent(str); } catch (_) { /* already decoded */ }
+      return str.replace(/\\/g, "/").replace(/\/{2,}/g, "/")
+        .replace(/^\/+/, "").replace(/[?#].*$/, "").toLowerCase();
+    };
+    const x = norm(a), y = norm(b);
+    return !!x && x === y;
   }
 
   /**
