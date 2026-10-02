@@ -137,6 +137,16 @@ check("nor is the bucket: dead and prone are not a creature's name",
   artWords("Virric Dead"), "virric");
 check("and prone the same", artWords("prone-virric"), "virric");
 
+// ⚠️🔴 HIS THREE FILES, 2026-10-01. The whole-name test refused all three
+// because of the extra word: "Virric 33A" was virric AND 33a, two words.
+check("Virric 33A is Virric", artWords("Virric 33A"), "virric");
+check("Virric number 1 is Virric", artWords("Virric number 1"), "virric");
+check("Virric token is Virric", artWords("Virric token"), "virric");
+check("and a portrait or an img is still just the creature",
+  artWords("Virric portrait") + "/" + artWords("Virric img"), "virric/virric");
+check("a variant letter on a number is a variant, not a word",
+  artWords("Goblin 2b") + "/" + artWords("Goblin v3"), "goblin/goblin");
+
 // Which word decides, given a library.
 const whole = (...names) => (w) => names.some(n => {
   const ws = _artWordsOf(n);
@@ -151,6 +161,12 @@ check("Velikov only when nothing is named Virric",
 check("Fred the Balor takes Balor", _firstNameWordNamingArt("Fred the Balor", whole("Balor")), "balor");
 check("a two-letter word counts when it IS the file name",
   _firstNameWordNamingArt("Ox", whole("Ox")), "ox");
+check("all three of his Virric files are the whole name",
+  _firstNameWordNamingArt("Virric Velikov", whole("Virric 33A")) + "/"
+  + _firstNameWordNamingArt("Virric Velikov", whole("Virric number 1")) + "/"
+  + _firstNameWordNamingArt("Virric Velikov", whole("Virric token")), "virric/virric/virric");
+check("Crocodile is still not Roc",
+  _firstNameWordNamingArt("Roc", whole("Crocodile_Large_Beast_01")), null);
 check("a word inside a longer filename is not the whole name",
   _firstNameWordNamingArt("Fred the Balor", whole("Balor Huge Fiend 01")), null);
 check("and a word nothing is named for decides nothing",

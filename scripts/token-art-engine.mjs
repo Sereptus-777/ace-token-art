@@ -992,13 +992,29 @@ export function _containsWordRun(haystack, needleTokens) {
  *
  * ⚠️ Pure and exported so tools/name-match-selftest.mjs can hold the rule.
  */
-const _BUCKET_WORDS = new Set(["dead", "prone", "corpse"]);
+/* ⚠️🔴 HIS FILES, 2026-10-01: "Virric 33A", "Virric number 1", "Virric
+   token". The whole-name test refused all three because of the extra word.
+   His rule: "A number, a size, and the words token, number, portrait and img are
+   not part of a file's name. Drop those and the file's name is Virric, so it is
+   on the list and it can be picked."
+   These are what a librarian writes beside a name, not part of the name. */
+const _BUCKET_WORDS = new Set(["dead", "prone", "corpse",
+    "token", "number", "portrait", "img", "image", "art"]);
+/**
+ * A variant tag, not a word: `01`, `11`, `33A`, `v2`, `2b`.
+ *
+ * ⚠️ NUMERIC_RE WAS NOT ENOUGH, AND "Virric 33A" IS WHY. A number with a letter
+ * on it is how a library numbers two pictures of one creature, and it was read
+ * as a word — so that file was `virric` AND `33a`, two words, and therefore not
+ * the whole name of anything.
+ */
+const _VARIANT_RE = /^v?\d+[a-z]?$|^[a-z]\d+$/i;
 /** An image extension is not a word. The index strips it; a caller may not. */
 const _ART_EXT = /\.(png|webp|jpe?g|gif|avif|svg|webm|mp4|m4v|ogv)$/i;
 export function _artWordsOf(text) {
     return [...new Set(_significantWords(String(text ?? "").replace(_ART_EXT, "")))]
         .filter(w => !SIZE_TOKENS.has(w) && !STRIP_TOKENS.has(w) && !NUMERIC_RE.test(w)
-            && !_BUCKET_WORDS.has(w));
+            && !_VARIANT_RE.test(w) && !_BUCKET_WORDS.has(w));
 }
 
 /**
@@ -1286,6 +1302,18 @@ function _findMatches(actorName) {
         if (familyOnly.length) return { matches: familyOnly.slice(), reason: "family" };
     }
 
+    /* ⚠️🔴 AN EMPTY RESULT IS A FAILURE (his rule, 2026-10-01). Returning
+       nothing quietly is how 69 creatures were reported as having no art while
+       the art sat on his disk in folders he had just added. So the way out with
+       nothing in hand says what it looked for and what it had to look in, which
+       is the difference between "this creature has no picture" and "the index is
+       empty because the folders are not set". */
+    console.warn(`ace-token-art | NOTHING matched "${actorName}". Its words were `
+        + `${_nameWordsOf(lower).join(", ") || "none at all"}; the index holds ${_index.all.length} `
+        + `file(s)${_index.all.length ? "" : " — which is the real problem: no folders are set, or "
+            + "the scan has not run"}. Every step was tried: exact, base, prefix, stripped, key, `
+        + `substring, named-inside, whole-name and all-words`
+        + `${actorFamily ? `, and its family folder (${actorFamily})` : ", and it has no family folder"}.`);
     return { matches: [], reason: "none" };
 }
 

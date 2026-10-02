@@ -533,9 +533,78 @@ ${dir}`;
       imgWrap.title = _tip;
       img.title = _tip;
 
+      /* ── THE ONE ALREADY ON THE TOKEN IS MARKED, IN GREEN ──────────────
+       *
+       * ⚠️🔴 HIS RULE, 2026-10-01: "The picture already on the token is marked
+       * in green, with the word Current. Portrait and prone are marked
+       * separately. Gold is not the current mark."
+       *
+       * Gold is this picker's own colour — the panel, the header, the hover
+       * border and the selected tab are all gold — so gold cannot also mean
+       * "this is the one you are using"; it would be saying two things at once
+       * on the same card. Green says it and nothing else does.
+       *
+       * ⚠️ AND EACH TAB ANSWERS ITS OWN QUESTION. The token's texture, the
+       * actor's portrait and the prone flag are three different pictures, so
+       * "Current" in the Portrait tab means the portrait and nothing else. A
+       * card marked current in one tab is an ordinary card in the next.
+       */
+      const _isCurrent = (() => {
+        try {
+          const here = String(entry.path ?? "");
+          if (!here) return false;
+          const same = (p) => {
+            const a = String(p ?? "");
+            if (!a) return false;
+            try { return decodeURIComponent(a) === decodeURIComponent(here); }
+            catch (_) { return a === here; }
+          };
+          if (_mode === "portrait") {
+            return same(TokenArtPicker._worldActorFor(tokenDoc)?.img ?? tokenDoc?.actor?.img);
+          }
+          if (_mode === "prone") {
+            const world = TokenArtPicker._worldActorFor(tokenDoc);
+            return same(world?.getFlag?.("ace-qol", "proneArt")
+              ?? tokenDoc?.actor?.getFlag?.("ace-qol", "proneArt"));
+          }
+          // The token on the map, and what it was wearing before it went prone:
+          // a creature lying down is still "using" its standing art.
+          return same(tokenDoc?.texture?.src)
+            || same(tokenDoc?.getFlag?.("ace-qol", "proneArtPrevious"));
+        } catch (_) { return false; }
+      })();
+      if (_isCurrent) {
+        card.style.borderColor = "#5fd36a";
+        card.style.boxShadow = "0 0 0 1px rgba(95,211,106,0.45), 0 0 12px rgba(95,211,106,0.30)";
+        const mark = document.createElement("div");
+        mark.textContent = "Current";
+        Object.assign(mark.style, {
+          position: "absolute", top: "6px", left: "6px", zIndex: "3",
+          padding: "2px 8px", borderRadius: "999px",
+          background: "#5fd36a", color: "#0b1a0d",
+          font: "700 12px/1.3 'Signika','Helvetica Neue',sans-serif",
+          letterSpacing: "0.4px", pointerEvents: "none",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.5)",
+        });
+        _imp(mark, { position: "absolute" });
+        imgWrap.style.position = "relative";
+        imgWrap.appendChild(mark);
+        lbl.title = `${lbl.title}
+— this is the ${_mode === "portrait" ? "portrait" : _mode === "prone" ? "prone art" : "token art"} in use`;
+      }
+
       card.appendChild(imgWrap); card.appendChild(lbl);
-      card.addEventListener("mouseenter", () => { card.style.borderColor = "#d4af37"; card.style.transform = "translateY(-2px)"; });
-      card.addEventListener("mouseleave", () => { card.style.borderColor = "transparent"; card.style.transform = "none"; });
+      // ⚠️ HOVER NEVER TAKES THE GREEN OFF. Gold on hover is this picker's
+      // feedback everywhere; on the current card it would read as the mark
+      // changing colour, so the current card keeps its own border throughout.
+      card.addEventListener("mouseenter", () => {
+        if (!_isCurrent) card.style.borderColor = "#d4af37";
+        card.style.transform = "translateY(-2px)";
+      });
+      card.addEventListener("mouseleave", () => {
+        if (!_isCurrent) card.style.borderColor = "transparent";
+        card.style.transform = "none";
+      });
       card.addEventListener("click", async () => {
         const saveDefault = document.getElementById("ace-ta-save-default")?.checked !== false;
         if (_mode === "portrait") return TokenArtPicker._applyPortrait(tokenDoc, entry, { saveDefault });

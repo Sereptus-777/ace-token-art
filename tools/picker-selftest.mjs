@@ -167,6 +167,35 @@ check("the walk's own index replaces the saved one when it finishes",
   `${fresh.all.length} entries from the walk`);
 check("and says so again", hookLog.filter(h => h === engine.INDEX_READY_HOOK).length >= 2, hookLog.join(", "));
 
+/* == THE ONE ALREADY IN USE IS MARKED, IN GREEN ========================= */
+//
+// His rule, 2026-10-01: "The picture already on the token is marked in green,
+// with the word Current. Portrait and prone are marked separately. Gold is not
+// the current mark."
+//
+// Gold is this picker's own colour — panel, header, hover border, selected tab —
+// so it cannot also mean "this is the one you are using".
+console.log("");
+console.log("THE CURRENT PICTURE");
+{
+  const src = readFileSync("D:/FoundryVTT/Data/modules/ace-token-art/scripts/token-art-picker.mjs",
+    "utf8");
+  check("the mark is the word Current", /mark\.textContent = "Current";/.test(src), true);
+  check("and it is green, not gold",
+    /background: "#5fd36a", color: "#0b1a0d",/.test(src)
+    && /card\.style\.borderColor = "#5fd36a";/.test(src), true);
+  check("each tab answers its own question: texture, portrait, prone flag",
+    /if \(_mode === "portrait"\)/.test(src) && /if \(_mode === "prone"\)/.test(src)
+    && /same\(tokenDoc\?\.texture\?\.src\)/.test(src)
+    && /getFlag\?\.\("ace-qol", "proneArt"\)/.test(src), true);
+  check("a creature lying down still counts its standing art as current",
+    /same\(tokenDoc\?\.getFlag\?\.\("ace-qol", "proneArtPrevious"\)\)/.test(src), true);
+  check("and hover never takes the green off",
+    /if \(!_isCurrent\) card\.style\.borderColor = "#d4af37";/.test(src), true);
+  check("the paths are compared decoded, so %20 is not a different file",
+    /decodeURIComponent\(a\) === decodeURIComponent\(here\)/.test(src), true);
+}
+
 console.log("");
 console.log(pass + " passed, " + fail + " failed");
 if (fail) process.exitCode = 1;
