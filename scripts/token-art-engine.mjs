@@ -1051,6 +1051,90 @@ export function _firstNameWordNamingArt(name, isWholeFileName) {
     return null;
 }
 
+/**
+ * THE LIST A NAME ANSWERS WITH: every file holding any word of that name.
+ *
+ * ⚠️🔴 TWO PLACES WERE ASKING THIS AND BOTH ASKED IT AS A SUBSTRING.
+ * `searchTokenArt` filtered on `baseLower.includes("virric vaesoldandros")`, and
+ * the picker's own `firstMatches` ran the same test again for page 1. One phrase,
+ * so only a file carrying both words could be listed, and his three Virric files
+ * were invisible in a folder that held them (2026-10-01).
+ *
+ * His rule: "A file is listed when any word of his name is a word in the file,
+ * after a number, a size, and token, number, portrait, img, image and art are
+ * dropped. Both-words files stay listed and still win the auto-pick."
+ *
+ * So the order is the strength of the hit, best first:
+ *   1. the file is named those words and nothing else — the auto-pick's answer
+ *   2. every word of the name is a word in the file
+ *   3. one word of the name is a word in the file
+ *
+ * ⚠️🔴 WHOLE WORDS ON BOTH SIDES, AND THE FIRST VERSION OF THIS GOT IT
+ * WRONG. I kept a substring tier at the top to hold the both-words files first,
+ * and his own rule caught it in the pins: "Whole words only: Crocodile is not
+ * Roc." `"crocodile".includes("roc")` is true, so a loose phrase tier hands a
+ * crocodile to a roc. There is no substring test here at all — a part-typed word
+ * in the search box comes back empty from this and the picker's own ladder
+ * answers it, which is what that ladder is for.
+ *
+ * ⚠️ ONE FUNCTION, BECAUSE PAGE 1 IS DRAWN FROM A DIFFERENT CALL THAN THE
+ * REST. The picker paints the first twenty, then counts the full list on the next
+ * tick WITHOUT redrawing those cards, so a page 1 built by another test is a
+ * page 1 that disagrees with its own page count. `stopAt` is how the picker stops
+ * early and still gets a true prefix of this list: the strongest bucket is filled
+ * in index order, so once it holds the twenty it needs, nothing later can
+ * outrank them.
+ *
+ * @param {object[]} entries  index entries (`fullLower`, `baseLower`)
+ * @param {string} query  the creature's name
+ * @param {{stopAt?: number}} [opts]  stop once the strongest bucket has this many
+ * @returns {{listed: object[], exact: number, every: number, one: number,
+ *            words: string[], perWord: Record<string, number>}}
+ */
+export function rankArtForName(entries, query, { stopAt = 0 } = {}) {
+    const all = Array.isArray(entries) ? entries : [];
+    const q = String(query ?? "").toLowerCase().trim();
+    const words = _nameWordsOf(q);
+    const perWord = {};
+    for (const w of words) perWord[w] = 0;
+    if (!q) return { listed: all.slice(), exact: all.length, every: 0, one: 0, words, perWord };
+    /* ⚠️ NO USABLE WORD IS A FAILURE, NOT AN EMPTY SHELF. A name made entirely
+       of stop words cannot be answered here, and the caller's ladder takes it. */
+    if (!words.length) return { listed: [], exact: 0, every: 0, one: 0, words, perWord };
+
+    const exact = [], every = [], one = [];
+    let stopped = false;
+    for (const e of all) {
+        const has = _artWordsOf(`${e?.fullLower ?? ""} ${e?.baseLower ?? ""}`);
+        if (!has.length) continue;
+        const hits = words.filter(w => has.includes(w));
+        if (!hits.length) continue;
+        /* ⚠️ COUNTED IN THE SAME PASS. Asking a second time, once per word, cost
+           71ms over his 28,069 files — more than the whole ranking (42ms) — and the
+           answer was already in front of it. The count is short on an early stop,
+           which is why only the full list prints a line. */
+        for (const w of hits) perWord[w]++;
+        if (hits.length === words.length) {
+            // Named those words and nothing else, so it is a picture OF him and
+            // not of him beside somebody.
+            if (has.length === words.length) {
+                exact.push(e);
+                if (stopAt > 0 && exact.length >= stopAt) { stopped = true; break; }
+            } else every.push(e);
+        } else one.push(e);
+    }
+    /* ⚠️ A SHORT LIST IS THE STRONGEST BUCKET ALONE, NOT WHAT HAPPENED TO BE
+       SEEN FIRST. The weaker buckets were still being filled when the scan
+       stopped, and a weak hit that sits early in the index would jump ahead of
+       strong ones nobody has read yet — which is not a prefix of the full list,
+       and the pin caught exactly that (Virric Vaesoldandros third). */
+    return {
+        listed: stopped ? exact.slice(0, stopAt) : [...exact, ...every, ...one],
+        exact: exact.length, every: every.length, one: one.length, words, perWord,
+    };
+}
+
+
 function _findMatches(actorName) {
     const rawLower = (actorName || "").toLowerCase().trim();
     if (!rawLower) return { matches: [], reason: "none" };

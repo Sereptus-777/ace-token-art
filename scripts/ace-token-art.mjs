@@ -19,6 +19,7 @@ import {
     getPortraitIndex,
     auditAndRepairTokenPaths,
     INDEX_READY_HOOK,
+    rankArtForName,
 } from "./token-art-engine.mjs";
 import { TokenScaleWrite } from "./token-scale-write.mjs";
 
@@ -791,20 +792,55 @@ Hooks.once("ready", async () => {
              * { checked, dead, repaired, unresolved }.
              */
             repairTokenArt: async (opts = {}) => auditAndRepairTokenPaths(opts),
-            /** Substring search for "where's my art for X?" debugging. */
+            /**
+             * The list the token art picker shows.
+             *
+             * ⚠️🔴 THIS WAS A SUBSTRING TEST ON THE WHOLE NAME, AND THAT IS THE
+             * BUG HE AUDITED (2026-10-01): "Virric Vaesoldandros still lists only
+             * files with both words. Virric 33A, Virric number 1 and Virric token
+             * are in the folder and are not on that list."
+             *
+             * Exactly right, and my own work was in the wrong function: the
+             * engine's `_findMatches` ladder, which is where the name rules went,
+             * is not what the picker calls. The picker calls this, and this did
+             * `baseLower.includes("virric vaesoldandros")` — one phrase, so only
+             * a file carrying both words could ever be listed.
+             *
+             * His rule: "A file is listed when any word of his name is a word in
+             * the file, after a number, a size, and token, number, portrait, img,
+             * image and art are dropped. Both-words files stay listed and still
+             * win the auto-pick."
+             *
+             * So: whole words on both sides, every name word counts on its own,
+             * and the order is full phrase → every word → any word, which keeps
+             * the both-words files at the top where the auto-pick reads them.
+             */
             searchTokenArt: (query) => {
                 const idx = getTokenArtIndex();
-                const q = (query || "").toLowerCase().trim();
-                if (!q) return idx.all.slice();
-                return idx.all.filter(e =>
-                    e.baseLower.includes(q) || e.fullLower.includes(q)
-                ).map(e => ({
-                    base:     e.displayBase,
-                    variant:  e.displayVariant,
-                    fullName: e.fullName,
-                    path:     e.path,
-                }));
+                /* ⚠️ THE RAW ENTRY, plus the two old aliases. The reshaped object
+                   this used to return dropped `displayBase`, `baseLower` and
+                   `familyFolder`, which the picker's cards and the chooser read. */
+                const out = (e) => ({ ...e, base: e.displayBase, variant: e.displayVariant });
+                const r = rankArtForName(idx.all, query);
+
+                /* ⚠️ ONE LINE, WITH BOTH NUMBERS (his rule, 2026-10-01: "Print one
+                   line: how many files contain the word Virric, how many the
+                   picker showed."). A list that is quietly short is the whole
+                   fault being fixed here, so what the folder holds and what the
+                   picker shows go out together and can be compared at a glance. */
+                try {
+                    const per = r.words.map(w => `${w}: ${r.perWord[w]}`).join(", ");
+                    console.log(`${MODULE_ID} | art for "${query}" — files holding `
+                        + `${per || "no usable word"}; the picker shows ${r.listed.length} `
+                        + `(${r.exact} named exactly that, ${r.every} every word, ${r.one} one word) `
+                        + `of ${idx.all.length} indexed.`);
+                } catch (err) { console.warn(`${MODULE_ID} | could not count the art list:`, err); }
+
+                return r.listed.map(out);
             },
+
+            /** The one test behind both the picker's page 1 and its full list. */
+            rankArtForName,
 
             /**
              * Give art to every creature that has none.

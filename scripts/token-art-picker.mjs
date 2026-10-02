@@ -27,7 +27,7 @@ export const VIDEO_EXT_RE = /\.(webm|mp4|m4v|ogv)$/i;
 export const ART_EXT_RE   = /\.(webp|png|jpg|jpeg|svg|gif|avif|webm|mp4|m4v|ogv)$/i;
 
 const MID = "ace-token-art";
-const PICKER_BUILD = "1.2.0";   // shown in the header — if you don't see this number, the new file isn't loading
+const PICKER_BUILD = "1.3.0";   // shown in the header — if you don't see this number, the new file isn't loading
 
 function _api() { return game.modules.get(MID)?.api ?? null; }
 
@@ -75,30 +75,40 @@ function _queryArt(name) {
 export const PER_PAGE = 20;
 
 /**
- * The first `n` pieces of token art whose name holds the query, in index order,
- * stopping the moment it has them.
+ * The first `n` pieces of token art a name answers with, stopping as soon as it
+ * has them.
  *
  * ⚠️ PAGE 1 BEFORE THE REST (his table, 2026-09-18: "Build and show page 1
  * first. Do not scan the whole library before those 20 appear."). The full
  * search reads every one of his ~26,000 entries before anything is drawn; this
- * reads only as far as the twentieth match. Same test and same order as the
- * API's own search, so page 1 does not change when the full count arrives.
+ * reads only as far as the twentieth match.
+ *
+ * ⚠️🔴 IT USED TO RUN ITS OWN TEST, AND THAT IS HALF OF WHY HIS VIRRIC
+ * FILES WERE MISSING (2026-10-01). Page 1 is drawn from this call and the full
+ * list from `searchTokenArt` on the next tick, and the cards already on screen
+ * are NOT redrawn when it lands. Two substring tests agreed with each other and
+ * both were wrong; fixing only the API's would have left page 1 showing the two
+ * both-words files while the footer counted eleven. One test now, and it lives
+ * in the engine beside the word rules: `rankArtForName`.
  *
  * @param {{all: object[]}} index  the token-art index
+ * @param {string} query  the creature's name
+ * @param {number} n  how many to come back with
+ * @param {Function} [rank]  the ranker, for a test with no module API
  * @returns {object[]} index entries
  */
-export function firstMatches(index, query, n = PER_PAGE) {
+export function firstMatches(index, query, n = PER_PAGE, rank = null) {
   const all = Array.isArray(index?.all) ? index.all : [];
-  const q = String(query ?? "").toLowerCase().trim();
-  if (!q) return all.slice(0, n);
-  const out = [];
-  for (const e of all) {
-    if (String(e?.baseLower ?? "").includes(q) || String(e?.fullLower ?? "").includes(q)) {
-      out.push(e);
-      if (out.length >= n) break;
-    }
+  const rankFn = rank ?? _api()?.rankArtForName ?? null;
+  if (typeof rankFn !== "function") {
+    /* ⚠️ SILENCE IS A BUG. An empty page 1 here is not "no art": it is this
+       module's own API missing, and the caller falls through to the full search,
+       which says so again with its count line. */
+    console.warn(`${MID} | page 1 could not be built — the module API has no `
+      + `rankArtForName, so the full search draws the first page instead.`);
+    return [];
   }
-  return out;
+  return rankFn(all, query, { stopAt: n }).listed.slice(0, n);
 }
 
 /**
