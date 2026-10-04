@@ -20,11 +20,120 @@ import {
     auditAndRepairTokenPaths,
     INDEX_READY_HOOK,
     rankArtForName,
+    saveDeferredIndexCache,
 } from "./token-art-engine.mjs";
 import { TokenScaleWrite } from "./token-scale-write.mjs";
 
 export const MODULE_ID = "ace-token-art";
 const LEGACY_MODULE_ID = "ace-engine";   // where these settings used to live
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ONE RESCAN, ALL THREE ROOTS
+
+     His rule, 2026-10-03: "Rescan reads all three roots and does not save until
+     every root has reported. A second click while it is running does nothing.
+     Show a progress line while it walks. When it finishes, one toast, not red,
+     and it goes away on its own."
+
+   ⚠️🔴 WHAT IT USED TO DO, ON ALL FOUR COUNTS. It walked the three in turn and
+   the token walk SAVED ITS CACHE the moment it finished, so a window closed
+   during the portrait walk left a cache on disk that was only as true as one
+   library and was loaded at the next startup as if it were whole. Nothing
+   stopped a second click, so two walks of twenty-eight thousand files ran over
+   each other. Nothing said it was working. And it finished with a permanent
+   toast plus up to three more warnings behind it, which is four things to
+   dismiss by hand after a scan that went fine.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** The run in flight, or null. A second click reads this and goes home. */
+let _rescanInFlight = null;
+
+/**
+ * Walk every configured root, then save once.
+ * @returns {Promise<object|null>} the counts, or null when a run was already going
+ */
+export async function rescanAllArt() {
+  if (_rescanInFlight) {
+    // ⚠️ SAID OUT LOUD, QUIETLY. A click that does nothing and says nothing is
+    // indistinguishable from a dead button.
+    console.log(`${MODULE_ID} | a rescan is already walking the folders; this click does nothing.`);
+    try { ui.notifications?.info("ACE: Token Art — a rescan is already running."); } catch (_) {}
+    return null;
+  }
+  const run = (async () => {
+    let line = null;
+    try { line = ui.notifications?.info("ACE: Token Art — reading your art folders…", { progress: true }) ?? null; }
+    catch (_) { line = null; }
+    const say = (pct, message) => {
+      try { line?.update?.({ pct, message }); } catch (_) { /* a progress line never stops the walk */ }
+    };
+
+    try {
+      await ACETokenArtFolders.reconcileFromText();
+      const api = game.modules.get(MODULE_ID)?.api;
+
+      const tFolders = game.settings.get(MODULE_ID, "tokenArtFolders") ?? [];
+      const pFolders = game.settings.get(MODULE_ID, "tokenArtPortraitFolders") ?? [];
+      const rFolders = game.settings.get(MODULE_ID, "tokenArtProneFolders") ?? [];
+
+      // Three walks, one third of the line each, and the counts as they come.
+      const leg = (base, label) => ({ dirs, files }) =>
+        say(base + Math.min(0.30, (dirs / 1200) * 0.30),
+          `ACE: Token Art — ${label}: ${files.toLocaleString()} file(s) in ${dirs.toLocaleString()} folder(s)…`);
+
+      // ⚠️ THE TOKEN WALK HOLDS ITS SAVE. Nothing is written until the other two
+      // have reported, so what lands on disk is one whole answer or none.
+      const tokenRes    = await api?.rescanTokenArt?.({ useCache: false, silent: true,
+        deferSave: true, onProgress: leg(0.00, "tokens") });
+      const portraitRes = await api?.rescanPortraitArt?.({ silent: true, onProgress: leg(0.33, "portraits") });
+      const proneRes    = await api?.rescanProneArt?.({ silent: true, onProgress: leg(0.66, "dead and prone art") });
+
+      say(0.99, "ACE: Token Art — saving the index…");
+      const saved = await api?.saveArtIndexCache?.();
+
+      const counts = {
+        token: tokenRes?.fileCount ?? 0, portrait: portraitRes?.fileCount ?? 0,
+        prone: proneRes?.fileCount ?? 0, saved: !!saved,
+      };
+      console.log(`${MODULE_ID} | Rescan complete, and the index was ${saved ? "saved once, after every root reported" : "NOT saved"}.`
+        + `\n  Token art (${tFolders.join(", ") || "none"}): ${counts.token} file(s)`
+        + `\n  Portraits (${pFolders.join(", ") || "none"}): ${counts.portrait} file(s)`
+        + `\n  Dead and prone (${rFolders.join(", ") || "none"}): ${counts.prone} file(s)`);
+
+      /* ⚠️ A ROOT THAT CAME BACK EMPTY IS STILL ONE LINE, NOT A RED ONE. It used
+         to raise a permanent warning per empty list, so a man with no portraits
+         configured got a red banner he had to clear every single rescan. It is
+         on the one line now, in the same words, and it disappears by itself. */
+      const empties = [
+        tFolders.length && !counts.token ? "tokens" : null,
+        pFolders.length && !counts.portrait ? "portraits" : null,
+        rFolders.length && !counts.prone ? "dead and prone art" : null,
+        !tFolders.length ? "no token folders listed" : null,
+        !pFolders.length ? "no portrait folders listed" : null,
+        !rFolders.length ? "no dead or prone folders listed" : null,
+      ].filter(Boolean);
+
+      say(1, "ACE: Token Art — done.");
+      const summary = `ACE: Token Art — ${counts.token.toLocaleString()} tokens, `
+        + `${counts.portrait.toLocaleString()} portraits, ${counts.prone.toLocaleString()} dead and prone.`
+        + (empties.length ? ` Nothing found for: ${empties.join(", ")}.` : "");
+      // ⚠️ ONE TOAST, NOT RED, AND IT GOES AWAY ON ITS OWN: no `permanent`.
+      try { ui.notifications?.info(summary); } catch (_) { /* the console has it either way */ }
+      return counts;
+    } catch (err) {
+      console.error(`${MODULE_ID} | the rescan failed partway through, so nothing was saved:`, err);
+      try { ui.notifications?.warn("ACE: Token Art — the rescan stopped early; the console says where."); } catch (_) {}
+      return null;
+    } finally {
+      // The line closes whichever way this went.
+      try { line?.update?.({ pct: 1 }); } catch (_) {}
+      _rescanInFlight = null;
+    }
+  })();
+  _rescanInFlight = run;
+  return run;
+}
+
 
 // ─── Migration helper ─────────────────────────────────────────────────────
 
@@ -414,88 +523,10 @@ function _registerSettings() {
                     });
                 }
                 async _render() {
-                    // No form of its own - open the real dialog and get out of the way.
-                    try {
-                        const { openFolderConfigDialog } = await import("./folder-config-dialog.mjs");
-                        await openFolderConfigDialog();
-                    } catch (err) {
-                        console.error(`${MODULE_ID} | could not open the folder dialog:`, err);
-                        ui.notifications?.error("ACE: Token Art \u2014 the folder dialog would not open, see the console.");
-                    }
-                    this.close();
-                }
-            },
-        });
-    } catch (err) {
-        console.warn(`${MODULE_ID} | could not register the folder dialog menu:`, err);
-    }
-
-    // ── "Rescan Folders Now" — a plain BUTTON in the settings panel ──
-    // There are too few settings here to justify a pop-up, so the folder list
-    // and every toggle live inline below. This menu renders nothing: it runs
-    // the rescan and closes immediately, which makes it behave like a button
-    // sitting in the settings list rather than another window to navigate.
-    try {
-        game.settings.registerMenu(MODULE_ID, "rescanNow", {
-            name: "Token Art Index",
-            label: "Rescan Folders Now",
-            hint: "Re-read every scan folder and rebuild the art index right now. You only need this if you added art files while Foundry was already running — folder edits and startup rescan it for you.",
-            icon: "fa-solid fa-arrows-rotate",
-            restricted: true,
-            type: class extends FormApplication {
-                static get defaultOptions() {
-                    return foundry.utils.mergeObject(super.defaultOptions, {
-                        id: "ace-token-art-rescan-now",
-                        title: "ACE: Token Art — Rescan",
-                        template: null,
-                        popOut: false,
-                    });
-                }
-                async _render() {
-                    // No form — just do the work and get out of the way.
-                    //
-                    // "Rescan Folders Now" means EVERY folder listed in these
-                    // settings, both lists. It used to call rescanTokenArt only,
-                    // so the portrait folders were never re-read — and it scanned
-                    // the stale `tokenArtFolders` array rather than what the panel
-                    // actually lists. Reconcile first, then scan both, then say
-                    // out loud what was scanned. (2026-08-06)
-                    try {
-                        await ACETokenArtFolders.reconcileFromText();
-                        const api = game.modules.get(MODULE_ID)?.api;
-
-                        const tFolders = game.settings.get(MODULE_ID, "tokenArtFolders") ?? [];
-                        const pFolders = game.settings.get(MODULE_ID, "tokenArtPortraitFolders") ?? [];
-                        const rFolders = game.settings.get(MODULE_ID, "tokenArtProneFolders") ?? [];
-
-                        const tokenRes    = await api?.rescanTokenArt?.({ useCache: false, silent: true });
-                        const portraitRes = await api?.rescanPortraitArt?.({ silent: true });
-                        const proneRes    = await api?.rescanProneArt?.({ silent: true });
-
-                        const parts = [
-                            `Token art: ${(tokenRes?.fileCount ?? 0).toLocaleString()} files / ${(tokenRes?.baseCount ?? 0).toLocaleString()} creatures across ${tFolders.length} folder${tFolders.length === 1 ? "" : "s"}`,
-                            `Portraits: ${(portraitRes?.fileCount ?? 0).toLocaleString()} files across ${pFolders.length} folder${pFolders.length === 1 ? "" : "s"}`,
-                            `Prone: ${(proneRes?.fileCount ?? 0).toLocaleString()} files across ${rFolders.length} folder${rFolders.length === 1 ? "" : "s"}`,
-                        ];
-                        ui.notifications?.info(`ACE: Token Art — rescan complete. ${parts.join(" · ")}`, { permanent: true });
-                        console.log(`${MODULE_ID} | Rescan complete.\n  Token folders   : ${tFolders.join(", ") || "(none)"}\n  Portrait folders: ${pFolders.join(", ") || "(none)"}`);
-
-                        // A listed folder that yielded nothing is almost always a
-                        // typo or a path that doesn't exist. Say so — silence here
-                        // is what let "it only scans two folders" go unnoticed.
-                        if (tFolders.length && !(tokenRes?.fileCount)) {
-                            ui.notifications?.warn(`ACE: Token Art — ${tFolders.length} token folder(s) listed but NO files found. Check the paths: ${tFolders.join(", ")}`, { permanent: true });
-                        }
-                        if (pFolders.length && !(portraitRes?.fileCount)) {
-                            ui.notifications?.warn(`ACE: Token Art — ${pFolders.length} portrait folder(s) listed but NO files found. Check the paths: ${pFolders.join(", ")}`, { permanent: true });
-                        }
-                        if (!pFolders.length) {
-                            ui.notifications?.warn("ACE: Token Art — no PORTRAIT folders are listed, so the Portrait tab will be empty. Add one in the settings panel.", { permanent: true });
-                        }
-                    } catch (err) {
-                        console.error(`${MODULE_ID} | Manual rescan failed:`, err);
-                        ui.notifications?.error("ACE: Token Art — rescan failed; see the console.");
-                    }
+                    // ONE DOOR. The work, the guard, the progress line and the
+                    // single toast all live in rescanAllArt().
+                    try { await rescanAllArt(); }
+                    catch (err) { console.error(`${MODULE_ID} | Manual rescan failed:`, err); }
                     this.close({ submit: false });
                 }
                 async _updateObject() { /* no-op */ }
@@ -539,9 +570,9 @@ function _registerSettings() {
     s("tokenArtFoldersList", {
         scope: "world",
         name: "Token Art Folders",
-        hint: "Top-down token images.",
+        hint: "Top-down token images. Portraits and dead or prone art live in their own lists below, and a walk of one never crosses into another.",
         type: String,
-        default: "",
+        default: "1_tokens",
         config: true,
         onChange: (raw) => { ACETokenArtFolders.applyFromText(raw, "token"); },
     });
@@ -553,7 +584,7 @@ function _registerSettings() {
         scope: "world",
         config: false,          // storage — edited via the text field below
         type: Array,
-        default: [],
+        default: ["1_portraits"],
     });
 
     s("tokenArtPortraitFoldersList", {
@@ -561,7 +592,7 @@ function _registerSettings() {
         name: "Portrait Art Folders",
         hint: "Face images for the picker's Portrait tab. Sets the actor's profile picture.",
         type: String,
-        default: "",
+        default: "1_portraits",
         config: true,
         onChange: (raw) => { ACETokenArtFolders.applyFromText(raw, "portrait"); },
     });
@@ -577,15 +608,27 @@ function _registerSettings() {
         scope: "world",
         config: false,          // storage — edited via the text field below
         type: Array,
-        default: ["modules/ace-qol/Assets/Prone"],
+        /* ⚠️🔴 HIS ORDER, 2026-10-03: "modules/ace-qol/Assets/Dead stays in the
+           module and is checked only after 1_dead-prone." The library he keeps
+           comes first and the folder that ships with ACE is the fallback behind
+           it, so a picture he has put in his own library always wins over the
+           one the module brought.
+
+           ⚠️🔴 AND Assets/Prone IS STILL ON THE LIST, which he did not name.
+           It holds eight pictures of people with names — Escher, Izek, Chudd,
+           Firaxis, Jeth, Syrax, Vilnius, Virric — and not one of them is in the
+           manifest or in 1_dead-prone. Dropping the folder because he did not
+           mention it would have taken the prone art off eight named characters
+           without a word. It is last, behind both, and it is his to remove. */
+        default: ["1_dead-prone", "modules/ace-qol/Assets/Dead", "modules/ace-qol/Assets/Prone"],
     });
 
     s("tokenArtProneFoldersList", {
         scope: "world",
-        name: "Prone Art Folders",
-        hint: "Pictures of creatures lying down, for the picker's Prone tab. ACE QOL swaps a token to this art while it is prone.",
+        name: "Dead and Prone Art Folders",
+        hint: "Pictures of creatures lying down or dead, for the picker's Prone tab. ACE QOL swaps a token to this art when it goes prone or dies. The module's own Assets/Dead is checked after your own library.",
         type: String,
-        default: "modules/ace-qol/Assets/Prone",
+        default: "1_dead-prone\nmodules/ace-qol/Assets/Dead\nmodules/ace-qol/Assets/Prone",
         config: true,
         onChange: (raw) => { ACETokenArtFolders.applyFromText(raw, "prone"); },
     });
@@ -603,7 +646,9 @@ function _registerSettings() {
         scope: "world",
         config: false,    // edited via the "Configure Folders" menu above
         type: Array,
-        default: ["NPCs", "assets/srd5e/img/bestiary/tokens/MM"],
+        // ⚠️ HIS THREE LIBRARIES (2026-10-03). The copies are already made; these
+        // are where they live now.
+        default: ["1_tokens"],
     });
 
     s("tokenArtAutoRename", {
@@ -776,7 +821,10 @@ Hooks.once("ready", async () => {
                 // here means the console, the button and the startup path can
                 // all only ever scan the folders actually configured.
                 try { await ACETokenArtFolders.reconcileFromText(); } catch (_) {}
-                const result = await rebuildTokenArtIndex({ useCache, silent });
+                // ⚠️ THE WHOLE OPTIONS OBJECT, not three fields off it. A wrapper
+                // that names its arguments one by one is where `deferSave` and
+                // the progress line would quietly fall off on the way through.
+                const result = await rebuildTokenArtIndex({ ...opts, useCache, silent });
                 if (!silent && !result.fromCache) {
                     ui.notifications?.info(`${MODULE_ID}: Rescanned — ${result.fileCount} files, ${result.baseCount} base names.`);
                 }
@@ -854,6 +902,12 @@ Hooks.once("ready", async () => {
             // ── Prone (separate folders, separate index) ──
             getProneIndex,
             /** Rebuild the prone index from the configured prone folders. */
+            /**
+             * Write the index the rescan held back, after every root reported.
+             * His rule, 2026-10-03: nothing is saved until all three are in.
+             */
+            saveArtIndexCache: () => saveDeferredIndexCache(),
+
             rescanProneArt: async (opts = {}) => {
                 try { await ACETokenArtFolders.reconcileFromText(); } catch (_) {}
                 return rebuildProneIndex(opts);

@@ -74,7 +74,7 @@ export function getPortraitIndex() { return _portraits; }
  * No cache — portrait folders are small compared to token-art trees, and a
  * stale portrait list is more annoying than a one-second scan.
  */
-export async function rebuildPortraitIndex({ silent = false } = {}) {
+export async function rebuildPortraitIndex({ silent = false, onProgress = null } = {}) {
     const folders = (() => {
         try {
             const raw = game.settings.get(MODULE_ID, "tokenArtPortraitFolders");
@@ -97,7 +97,7 @@ export async function rebuildPortraitIndex({ silent = false } = {}) {
     // sequential walks, so the fix inside _scanFolders would have been mostly
     // wasted. One call, one bounded pool, all roots.
     let paths = [];
-    try { paths = await _scanFolders(folders); }
+    try { paths = await _scanFolders(folders, { skipDirs: _otherLibraryRoots("portrait"), onProgress }); }
     catch (err) { console.warn(`${TAG} | Portrait scan failed:`, err?.message ?? err); }
 
     const seen = new Set();
@@ -143,7 +143,7 @@ const _prone = {
 export function getProneIndex() { return _prone; }
 
 /** (Re)build the prone index from `tokenArtProneFolders`. */
-export async function rebuildProneIndex({ silent = false } = {}) {
+export async function rebuildProneIndex({ silent = false, onProgress = null } = {}) {
     const folders = (() => {
         try {
             const raw = game.settings.get(MODULE_ID, "tokenArtProneFolders");
@@ -162,7 +162,7 @@ export async function rebuildProneIndex({ silent = false } = {}) {
 
     const t0 = performance.now();
     let paths = [];
-    try { paths = await _scanFolders(folders); }
+    try { paths = await _scanFolders(folders, { skipDirs: _otherLibraryRoots("prone"), onProgress }); }
     catch (err) { console.warn(`${TAG} | Prone scan failed:`, err?.message ?? err); }
 
     const seen = new Set();
@@ -422,6 +422,24 @@ const CACHE_DIR  = (worldId) => `worlds/${worldId}/ace-token-art`;
 const CACHE_FILE = "index-cache.json";
 
 /** Save the current in-memory index to a JSON cache file. */
+/** The folders a deferred save will write, set by a rebuild that was told to wait. */
+let _pendingCacheFolders = null;
+
+/**
+ * Write the cache a deferred rebuild left waiting, or say there was none.
+ * Called once by whoever drove every root, after the last one reported.
+ */
+export async function saveDeferredIndexCache() {
+    const folders = _pendingCacheFolders;
+    _pendingCacheFolders = null;
+    if (!folders) {
+        console.log(`${TAG} | nothing was waiting to be saved: no walk asked for it to be held.`);
+        return false;
+    }
+    try { await _saveIndexCache(folders); return true; }
+    catch (err) { console.warn(`${TAG} | the held cache could not be saved:`, err); return false; }
+}
+
 async function _saveIndexCache(folders) {
     if (!_index.ready || !game.world?.id) return;
     const FP = foundry.applications?.apps?.FilePicker?.implementation ?? globalThis.FilePicker;
@@ -555,12 +573,69 @@ const SCAN_CONCURRENCY = 8;
  * @param {string[]} rootPaths
  * @returns {Promise<string[]>} image paths, deduplicated and sorted
  */
-async function _scanFolders(rootPaths) {
+/**
+ * A folder this walk never opens.
+ *
+ * ⚠️🔴 `_PSD Sources` IS NOT ART (his rule, 2026-10-03: "Ignore _PSD Sources
+ * and any file that is not an image"). It sits inside the dead-prone library and
+ * holds the layered originals, which are neither tokens nor corpses and are the
+ * biggest files he owns. Nothing that is not an image gets past `ART_EXT_RE`
+ * below either, so a .psd would be refused anyway — this stops the walk from
+ * even opening the folder, which is the slow part.
+ *
+ * ⚠️ AND A LIBRARY NEVER WALKS INTO ANOTHER ONE. "The token tab never lists a
+ * portrait or a dead-prone file. A portrait search never lists a token." With
+ * three separate roots that is true by itself, and it stops being true the
+ * moment somebody lists a parent of two of them — so each walk is told the other
+ * two roots and refuses to descend into them.
+ */
+function _skipThisFolder(dir, skipDirs) {
+    const d = String(dir ?? "").replace(/\/+$/, "").toLowerCase();
+    if (!d) return true;
+    if (/(^|\/)_psd sources$/.test(decodeURIComponent(d))) return true;
+    for (const skip of skipDirs) {
+        const sk = String(skip ?? "").replace(/\/+$/, "").toLowerCase();
+        if (!sk) continue;
+        if (d === sk || d.startsWith(`${sk}/`)) return true;
+    }
+    return false;
+}
+
+/**
+ * The roots the other two libraries own, so a walk refuses to cross into them.
+ * His rule, 2026-10-03: the token tab never lists a portrait or a dead-prone
+ * file, and a portrait search never lists a token.
+ */
+function _otherLibraryRoots(mine) {
+    const get = (key) => {
+        try {
+            const raw = game.settings.get(MODULE_ID, key);
+            return Array.isArray(raw) ? raw.filter(Boolean) : [];
+        } catch (_) { return []; }
+    };
+    const all = {
+        token:    get("tokenArtFolders"),
+        portrait: get("tokenArtPortraitFolders"),
+        prone:    get("tokenArtProneFolders"),
+    };
+    const mineSet = new Set((all[mine] ?? []).map(x => String(x).replace(/\/+$/, "").toLowerCase()));
+    return Object.entries(all)
+        .filter(([k]) => k !== mine)
+        .flatMap(([, v]) => v)
+        // ⚠️ A ROOT THIS LIBRARY ALSO OWNS IS NOT SOMEBODY ELSE'S. Two tabs
+        // pointed at one folder is a thing he may do on purpose, and refusing to
+        // walk his own root would hand him an empty tab with no reason given.
+        .filter(x => !mineSet.has(String(x).replace(/\/+$/, "").toLowerCase()));
+}
+
+async function _scanFolders(rootPaths, { skipDirs = [], onProgress = null } = {}) {
     const FP = foundry.applications?.apps?.FilePicker?.implementation ?? globalThis.FilePicker;
     const found = [];
     const visited = new Set();
+    const skips = (skipDirs ?? []).map(x => String(x ?? "")).filter(Boolean);
     let level = [...new Set(rootPaths.filter(Boolean))];
     let dirCount = 0;
+    let skipped = 0;
 
     while (level.length) {
         const next = [];
@@ -570,6 +645,7 @@ async function _scanFolders(rootPaths) {
         await _batchedForEach(level, SCAN_CONCURRENCY, async (dir) => {
             if (visited.has(dir)) return;
             visited.add(dir);
+            if (_skipThisFolder(dir, skips)) { skipped++; return; }
             dirCount++;
 
             let result;
@@ -584,7 +660,16 @@ async function _scanFolders(rootPaths) {
             }
             for (const sub of result.dirs ?? []) next.push(sub);
         });
+        // ⚠️ A WALK THAT SAYS NOTHING LOOKS LIKE A LOCKED SCREEN. His rule,
+        // 2026-10-03: "Show a progress line while it walks." The caller owns the
+        // line; this one only says how far it has got, after every level.
+        try { onProgress?.({ dirs: dirCount, files: found.length, queued: next.length }); }
+        catch (_) { /* a progress line must never stop the walk */ }
         level = next;
+    }
+    if (skipped) {
+        console.log(`${TAG} | walked past ${skipped} folder(s) that belong to another library `
+            + `or hold source files, not art.`);
     }
 
     found.sort();
@@ -607,7 +692,8 @@ async function _scanFolders(rootPaths) {
  * @param {boolean} [opts.silent=false]  — suppress the "scanning…" toast (used by background reloads)
  * @param {boolean} [opts.cacheOnly=false] — load the saved index if it fits and stop there; never walk the folders
  */
-export async function rebuildTokenArtIndex({ useCache = true, silent = false, cacheOnly = false } = {}) {
+export async function rebuildTokenArtIndex({ useCache = true, silent = false, cacheOnly = false,
+    onProgress = null, deferSave = false } = {}) {
     const folders = (() => {
         try {
             const raw = game.settings.get(MODULE_ID, "tokenArtFolders");
@@ -662,7 +748,7 @@ export async function rebuildTokenArtIndex({ useCache = true, silent = false, ca
 
     // ⚠️ ONE WALK ACROSS EVERY ROOT — see the note on _scanFolders. This loop
     // was the outer half of the same serialisation.
-    const allPaths = await _scanFolders(folders);
+    const allPaths = await _scanFolders(folders, { skipDirs: _otherLibraryRoots("token"), onProgress });
     // Dedupe by path (the walk already dedupes directories, not files across roots)
     const uniquePaths = [...new Set(allPaths)];
 
@@ -822,7 +908,15 @@ export async function rebuildTokenArtIndex({ useCache = true, silent = false, ca
 
     // Persist the fresh index so the next world load is instant. Fire-and-
     // forget; failures only mean we'll rescan again next time.
-    _saveIndexCache(folders).catch(err => console.warn(`${TAG} | Cache save (non-fatal):`, err));
+    /* ⚠️🔴 NOTHING IS SAVED UNTIL EVERY ROOT HAS REPORTED (his rule,
+       2026-10-03: "Rescan reads all three roots and does not save until every
+       root has reported"). A save fired from inside one walk writes a cache that
+       is only as true as that one library, and a crash or a closed window in the
+       middle of the next one leaves that half-answer on disk to be loaded at the
+       next startup as if it were whole. The caller that drives all three saves
+       once, at the end; `deferSave` is how it takes that job. */
+    if (deferSave) _pendingCacheFolders = folders;
+    else _saveIndexCache(folders).catch(err => console.warn(`${TAG} | Cache save (non-fatal):`, err));
 
     return { fileCount: all.length, baseCount: byBase.size };
 }
