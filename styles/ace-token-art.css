@@ -5,9 +5,18 @@
 .ace-token-art-chooser {
   position: fixed;
   z-index: 9999;
+  /* ⚠️🔴 RESIZABLE, AND IT KEEPS THE SIZE (his rule, 2026-10-04: "that one
+     is not resizable. I want it resizable, and I want it left at the same size
+     next time you open it"). `resize` does nothing while `overflow` is visible,
+     so the pair go together; the caps move out of the way of a drag or the
+     browser clamps the handle the moment it is used. The remembered size is
+     written back as an inline width and height, which beats these. */
   min-width: 360px;
-  max-width: 480px;
-  max-height: 78vh;
+  max-width: 96vw;
+  max-height: 92vh;
+  width: 480px;
+  resize: both;
+  overflow: auto;
   display: flex;
   flex-direction: column;
   padding: 12px;

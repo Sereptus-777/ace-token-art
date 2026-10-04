@@ -1708,6 +1708,61 @@ async function _applyArt(tokenDoc, entry, { renameSuffix = null } = {}) {
 
 // ─── Inline floating chooser ───────────────────────────────────────────────
 
+/* ── A WINDOW KEEPS THE SIZE HE LEFT IT (his rule, 2026-10-04) ──────────────
+ *
+ * "I want it resizable, and I want it left at the same size next time you open
+ * it."
+ *
+ * ⚠️ IT IS A CLIENT SETTING, NOT A WORLD ONE. The size a window was dragged to
+ * belongs to the screen it was dragged on: his desktop is a 4090 at full width
+ * and the camp laptop is not, and a world setting would have one of them
+ * fighting the other every rotation.
+ *
+ * ⚠️ AND IT IS WRITTEN ON RELEASE, NOT ON EVERY PIXEL. A ResizeObserver fires
+ * for every frame of a drag; a settings write per frame is a hundred writes for
+ * one resize.
+ */
+export function rememberSize(el, key) {
+  if (!el || !key) return;
+  // What he left it at last time, applied before it is shown.
+  try {
+    const saved = (game.settings.get(MODULE_ID, "uiSizes") ?? {})[key];
+    if (saved?.w > 200 && saved?.h > 150) {
+      el.style.width = `${Math.min(saved.w, window.innerWidth - 20)}px`;
+      el.style.height = `${Math.min(saved.h, window.innerHeight - 20)}px`;
+    }
+  } catch (err) {
+    console.warn(`${MODULE_ID} | could not read the size you left ${key} at, so it opens at its default:`, err);
+  }
+
+  // And what he leaves it at this time, once he lets go.
+  let timer = null;
+  const save = () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      try {
+        const all = foundry.utils.deepClone(game.settings.get(MODULE_ID, "uiSizes") ?? {});
+        all[key] = { w: Math.round(el.offsetWidth), h: Math.round(el.offsetHeight) };
+        await game.settings.set(MODULE_ID, "uiSizes", all);
+        console.log(`${MODULE_ID} | ${key} will open at ${all[key].w} by ${all[key].h} next time.`);
+      } catch (err) {
+        console.warn(`${MODULE_ID} | could not remember the size of ${key}:`, err);
+      }
+    }, 400);
+  };
+  try {
+    const ro = new ResizeObserver(save);
+    ro.observe(el);
+    // Stop watching when the window goes, or the observer outlives its element.
+    const stop = new MutationObserver(() => {
+      if (!document.body.contains(el)) { try { ro.disconnect(); } catch (_) {} stop.disconnect(); }
+    });
+    stop.observe(document.body, { childList: true, subtree: true });
+  } catch (err) {
+    console.warn(`${MODULE_ID} | this browser gave no ResizeObserver, so ${key} will not remember its size:`, err);
+  }
+}
+
 function _dismissActiveChooser() {
     if (_activeChooser?.parentNode) {
         try { _activeChooser.parentNode.removeChild(_activeChooser); } catch (_) {}
@@ -1787,6 +1842,7 @@ function _showChooser(tokenDoc, matches, { actorName } = {}) {
         root.className = "ace-token-art-chooser";
         root.style.left = `${left}px`;
         root.style.top  = `${top}px`;
+        rememberSize(root, "variantChooser");
         root.tabIndex = 0;
 
         const header = document.createElement("div");

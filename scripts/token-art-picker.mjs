@@ -276,6 +276,12 @@ export class TokenArtPicker {
     const panel = document.createElement("div");
     Object.assign(panel.style, {
       width: "min(94vw, 1200px)", height: "min(88vh, 880px)",
+      /* ⚠️🔴 DRAGGABLE BY ITS CORNER, AND IT KEEPS THE SIZE (his rule,
+         2026-10-04). `resize` does nothing unless `overflow` is already not
+         visible, and it is `hidden` below for the rounded corners, so the one
+         line is enough. `minWidth`/`minHeight` stop a stray drag collapsing it
+         to nothing he can grab again. */
+      resize: "both", minWidth: "520px", minHeight: "360px",
       display: "flex", flexDirection: "column",
       background: "linear-gradient(180deg,#15110d 0%,#0c0a08 100%)",
       border: "2px solid #d4af37", borderRadius: "10px",
@@ -814,6 +820,13 @@ ${dir}`;
     // On first grab we switch the panel from flex-centered to position:fixed at its
     // current spot (no jump), then follow the mouse. Move/up live on the full-screen
     // backdrop, so they're torn down automatically when close() removes it.
+    /* What he left it at last time. ⚠️ IMPORTED DYNAMICALLY ON PURPOSE: the
+       engine imports this file, so a static import back would close the cycle
+       that kills a module on the way in. */
+    import("./token-art-engine.mjs")
+      .then(({ rememberSize }) => rememberSize(panel, "artPicker"))
+      .catch(err => console.warn(`${MID} | the picker could not read the size you left it at:`, err));
+
     header.style.cursor = "move";
     let _drag = null;
     header.addEventListener("mousedown", (ev) => {

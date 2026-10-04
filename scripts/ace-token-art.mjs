@@ -633,6 +633,19 @@ function _registerSettings() {
         onChange: (raw) => { ACETokenArtFolders.applyFromText(raw, "prone"); },
     });
 
+    /* ⚠️ WHERE A WINDOW'S SIZE IS KEPT (his rule, 2026-10-04: "I want it left
+       at the same size next time you open it"). CLIENT scope, because the size
+       a window was dragged to belongs to the screen it was dragged on: his
+       desktop is a 4090 at full width and the camp laptop is not, and a world
+       setting would have one of them fighting the other every rotation. Not on
+       the settings panel: it is a memory, not a knob. */
+    s("uiSizes", {
+        scope: "client",
+        config: false,
+        type: Object,
+        default: {},
+    });
+
     s("tokenArtEnabled", {
         scope: "world",
         name: "Enable Auto Token Art",
