@@ -7,7 +7,7 @@
 // remove button. Add new rows with the "+ Add Folder" button. Rescan
 // updates the in-memory index immediately and shows the result inline.
 
-import { MODULE_ID } from "./ace-token-art.mjs";
+import { MODULE_ID, rescanAllArt } from "./ace-token-art.mjs";
 
 const TAG = "ACE: Token Art | Config";
 
@@ -272,25 +272,33 @@ export async function openFolderConfigDialog() {
             // Save current edits first, THEN rescan — rescan reads the
             // setting fresh each time. Pass useCache:false so this button
             // ALWAYS does a fresh disk scan (the whole point of the button).
-            const k = KINDS[_kind];
+            // Save what is in the boxes first: every walk reads the setting
+            // fresh off disk, not off this window.
             const folders = collectFolders(rootEl);
             await writeFolders(_kind, folders);
-            const api = game.modules.get(MODULE_ID)?.api;
-            // ⚠️ NAMED, NOT ASSUMED. If a kind ever loses its rescan the status
-            // must say so rather than report a successful scan of nothing.
-            if (typeof api?.[k.api] !== "function") {
-                throw new Error(`${k.label} has no rescan function (${k.api}) on the module API.`);
+
+            /* ⚠️ ONE DOOR, AND ALL THREE LIBRARIES (his ask, 2026-10-05: the
+               token folders rescanned AND the portrait index rebuilt from what
+               is on disk now). This used to call the current tab's own rescan,
+               which is how a token cache got written that was true of one
+               library; the guard against a second click, the progress line, the
+               held save and the single toast all live in rescanAllArt(). */
+            const counts = await rescanAllArt();
+            if (!counts) {
+                // ⚠️ null is "already walking" or "stopped early", and those are
+                // not a successful scan of nothing.
+                if (status) status.innerHTML = `<span style="color:#e0c080;">`
+                    + `<i class="fas fa-circle-info"></i> A rescan was already running, or it stopped `
+                    + `early. The console says which.</span>`;
+                return;
             }
-            const result = await api[k.api](k.args);
             if (status) {
-                const fileCount = result?.fileCount ?? 0;
-                const baseCount = result?.baseCount;
-                const bases = Number.isFinite(baseCount) ? ` / <strong>${baseCount.toLocaleString()}</strong> creature bases` : "";
-                status.innerHTML = `<span style="color:#a0e0a0;"><i class="fas fa-check"></i> ${k.label} scan complete: `
-                    + `<strong>${fileCount.toLocaleString()}</strong> files${bases} across `
-                    + `<strong>${folders.length}</strong> folder${folders.length === 1 ? "" : "s"}.</span>`;
+                status.innerHTML = `<span style="color:#a0e0a0;"><i class="fas fa-check"></i> Scan complete: `
+                    + `<strong>${counts.token.toLocaleString()}</strong> token, `
+                    + `<strong>${counts.portrait.toLocaleString()}</strong> portrait and `
+                    + `<strong>${counts.prone.toLocaleString()}</strong> dead or prone file(s). `
+                    + `${counts.saved ? "The index was saved." : "The index was NOT saved; the console says why."}</span>`;
             }
-            ui.notifications?.info?.(`ACE: Token Art — ${k.label.toLowerCase()}: indexed ${result?.fileCount ?? 0} file(s).`);
         } catch (err) {
             console.error(`${TAG} | Rescan failed:`, err);
             if (status) status.innerHTML = `<span style="color:#e08080;"><i class="fas fa-exclamation-triangle"></i> Rescan failed: ${escape(err.message ?? String(err))}</span>`;

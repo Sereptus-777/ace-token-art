@@ -500,6 +500,55 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
 function _registerSettings() {
     const s = (key, def) => game.settings.register(MODULE_ID, key, def);
 
+    /* ── RESCAN FOLDERS, FIRST IN THE PANEL ──────────────────────────────────
+     *
+     * ⚠️🔴 HIS RULE, 2026-10-05: "The button used to say Rescan folders and it is
+     * gone from that panel. Put it back at the top of that panel, above
+     * everything else. Same scan it used to run. Do not build a second one."
+     *
+     * It went when that menu entry was pointed at the folder window instead,
+     * which the window needed and this did not deserve to lose. So it is its own
+     * entry again, and it is REGISTERED FIRST, because Foundry draws a module's
+     * section in registration order and that is the only way to be at the top.
+     *
+     * It calls `rescanAllArt`, the one door: the guard against a second walk, the
+     * progress line, the held save and the single toast all live in there. There
+     * is no second scanner.
+     */
+    try {
+        game.settings.registerMenu(MODULE_ID, "rescanArt", {
+            name: "Token Art",
+            label: "Rescan folders",
+            hint: "Walk the token, portrait and dead-or-prone folders again and rebuild the index from "
+                + "what is on disk now. Run it after you add or move art.",
+            icon: "fa-solid fa-arrows-rotate",
+            restricted: true,
+            type: class extends FormApplication {
+                static get defaultOptions() {
+                    return foundry.utils.mergeObject(super.defaultOptions, {
+                        id: "ace-token-art-rescan-launcher",
+                        title: "ACE: Token Art — Rescan",
+                        template: null,
+                        popOut: false,
+                    });
+                }
+                async _render() {
+                    // Nothing of this launcher is ever on screen: it stands down
+                    // at once and lets the one scan get on with it.
+                    this.close({ submit: false });
+                    rescanAllArt().catch(err => {
+                        console.error(`${MODULE_ID} | the rescan failed:`, err);
+                        ui.notifications?.error("ACE: Token Art — the rescan failed; the console "
+                            + "says where.");
+                    });
+                }
+                async _updateObject() { /* no-op */ }
+            },
+        });
+    } catch (err) {
+        console.error(`${MODULE_ID} | the Rescan folders button could not be registered:`, err);
+    }
+
     // ── "Configure Folders" — the dialog, finally reachable ──
     //
     // ⚠️🔴 `folder-config-dialog.mjs` is 255 finished lines that nothing
@@ -523,10 +572,28 @@ function _registerSettings() {
                     });
                 }
                 async _render() {
-                    // ONE DOOR. The work, the guard, the progress line and the
-                    // single toast all live in rescanAllArt().
-                    try { await rescanAllArt(); }
-                    catch (err) { console.error(`${MODULE_ID} | Manual rescan failed:`, err); }
+                    /* ⚠️🔴 THIS BUTTON STOPPED OPENING THE WINDOW. It ran a blind
+                       rescan and closed, so the folder rows, the browse buttons
+                       and RESCAN NOW went back to being unreachable -- which is
+                       the exact fault the comment above this says was fixed, and
+                       the hint on the button promises all three. The window is
+                       the control; the rescan lives inside it.
+
+                       Loaded here and not at the top of the file: that dialog
+                       imports MODULE_ID back out of this one, and a static
+                       import both ways is the cycle that kills a module on the
+                       way in. */
+                    import("./folder-config-dialog.mjs")
+                        .then(({ openFolderConfigDialog }) => openFolderConfigDialog())
+                        .catch(err => {
+                            console.error(`${MODULE_ID} | the folder window could not open:`, err);
+                            try {
+                                ui.notifications?.error("ACE: Token Art — the folder window could not open; "
+                                    + "the console says why.");
+                            } catch (_) { /* the console has it either way */ }
+                        });
+                    // Nothing of this launcher is ever on screen, so it stands
+                    // down at once rather than staying open behind the window.
                     this.close({ submit: false });
                 }
                 async _updateObject() { /* no-op */ }
